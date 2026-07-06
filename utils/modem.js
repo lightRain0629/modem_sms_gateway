@@ -281,7 +281,12 @@ exports.sendSMS = (to, message) =>
     }
   });
 
-exports.getMessages = () =>
+/**
+ * Read all stored messages. If `persist` is given it is awaited with the
+ * parsed messages BEFORE they are deleted from the modem — if it throws,
+ * nothing is deleted and the messages stay on the SIM for the next read.
+ */
+exports.getMessages = (persist) =>
   enqueue(async () => {
     await transact({ write: 'AT+CMGF=1\r', label: 'CMGF' });
     await transact({ write: 'AT+CSCS="GSM"\r', label: 'CSCS' });
@@ -309,13 +314,18 @@ exports.getMessages = () =>
       }
     }
 
+    const result = messages.map(({ index, ...rest }) => rest);
+    if (result.length > 0 && persist) {
+      await persist(result);
+    }
+
     // Delete only the messages we actually read — never wipe the whole
     // storage, an SMS arriving mid-read would be lost otherwise.
     for (const msg of messages) {
       await transact({ write: `AT+CMGD=${msg.index},0\r`, label: `CMGD ${msg.index}` });
     }
 
-    return messages.map(({ index, ...rest }) => rest);
+    return result;
   });
 
 /** Query balance via USSD; returns the raw +CUSD line (or null on no reply). */

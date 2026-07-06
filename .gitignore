@@ -1,5 +1,5 @@
 node_modules/
 .env
-sent.json
-sent.json.tmp
+sent.json*
+gateway.db*
 .DS_Store

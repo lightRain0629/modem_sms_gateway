@@ -1,56 +1,71 @@
-const fs = require('fs').promises;
-const path = require('path');
-const createSerializer = require('../utils/serialize');
+const db = require('./db');
 
-const LOG_PATH = path.join(__dirname, '..', 'sent.json');
+// Columns a caller is allowed to change after creation, mapped to their
+// JS-side field names.
+const PATCHABLE = {
+  status: 'status',
+  error: 'error',
+  sentAt: 'sent_at',
+  reference: 'reference',
+};
 
-// All access goes through this lock so concurrent requests and the queue
-// worker never interleave reads with a rewrite. Single-process by design.
-const withLock = createSerializer();
+const insertStmt = db.prepare(`
+  INSERT INTO sent_messages
+    (id, timestamp, to_number, message, project_name, ip, status, error, sent_at, reference)
+  VALUES
+    (@id, @timestamp, @to, @message, @projectName, @ip, @status, @error, @sentAt, @reference)
+`);
 
-// The file is read once per process; afterwards this array is the source of
-// truth and writes just persist it, so status polls cost no disk I/O.
-let cache = null;
+const getStmt = db.prepare('SELECT * FROM sent_messages WHERE id = ?');
 
-async function ensureLoaded() {
-  if (!cache) {
-    try {
-      const logs = JSON.parse(await fs.readFile(LOG_PATH, 'utf8'));
-      cache = Array.isArray(logs) ? logs : [];
-    } catch (e) {
-      cache = []; // missing or invalid file -> start fresh
+function toEntry(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    timestamp: row.timestamp,
+    to: row.to_number,
+    message: row.message,
+    projectName: row.project_name,
+    ip: row.ip,
+    status: row.status,
+    error: row.error,
+    sentAt: row.sent_at,
+    reference: row.reference,
+  };
+}
+
+// better-sqlite3 is synchronous; the async signatures are kept so existing
+// callers (router, queue worker) stay unchanged.
+
+exports.appendLog = async (entry) => {
+  insertStmt.run({
+    id: entry.id,
+    timestamp: entry.timestamp,
+    to: entry.to,
+    message: entry.message,
+    projectName: entry.projectName ?? null,
+    ip: entry.ip ?? null,
+    status: entry.status,
+    error: entry.error ?? null,
+    sentAt: entry.sentAt ?? null,
+    reference: entry.reference ?? null,
+  });
+  return entry;
+};
+
+exports.updateLog = async (id, patch) => {
+  const sets = [];
+  const params = { id };
+  for (const [field, column] of Object.entries(PATCHABLE)) {
+    if (field in patch) {
+      sets.push(`${column} = @${field}`);
+      params[field] = patch[field] ?? null;
     }
   }
-  return cache;
-}
+  if (sets.length === 0) return toEntry(getStmt.get(id));
+  const result = db.prepare(`UPDATE sent_messages SET ${sets.join(', ')} WHERE id = @id`).run(params);
+  if (result.changes === 0) return null;
+  return toEntry(getStmt.get(id));
+};
 
-async function persist(logs) {
-  // temp file + rename so a crash mid-write can't corrupt the log
-  const tmpPath = LOG_PATH + '.tmp';
-  await fs.writeFile(tmpPath, JSON.stringify(logs, null, 2), 'utf8');
-  await fs.rename(tmpPath, LOG_PATH);
-}
-
-exports.appendLog = (entry) =>
-  withLock(async () => {
-    const logs = await ensureLoaded();
-    logs.push(entry);
-    await persist(logs);
-    return entry;
-  });
-
-exports.updateLog = (id, patch) =>
-  withLock(async () => {
-    const logs = await ensureLoaded();
-    const entry = logs.find((l) => l.id === id);
-    if (!entry) return null;
-    Object.assign(entry, patch);
-    await persist(logs);
-    return entry;
-  });
-
-exports.getLog = (id) =>
-  withLock(async () => {
-    const logs = await ensureLoaded();
-    return logs.find((l) => l.id === id) || null;
-  });
+exports.getLog = async (id) => toEntry(getStmt.get(id));

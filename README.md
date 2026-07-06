@@ -9,6 +9,7 @@ A small HTTP API that sends and receives SMS through a USB GSM modem.
   - **serial** — classic AT-command modems on `/dev/ttyUSB*` (serialport, auto-reconnect)
   - **zte-http** — ZTE HiLink/RNDIS sticks (MF823 / M100-3 ...) that expose a web API at `192.168.0.1` instead of a serial port
 - All modem access is serialized — the queue worker and API requests never talk to the modem at the same time
+- **SQLite storage** (`gateway.db`, via better-sqlite3): every outbound SMS with its delivery status, and every inbound SMS (persisted *before* it is deleted from the modem)
 - Delivery log in `sent.json` with per-message status: `pending → sent` or `pending → retrying → failed`
 - Messages that don't fit the GSM-7 charset (e.g. Cyrillic) are sent as UCS2 automatically
 - After a message finally fails, the gateway checks the SIM balance via USSD (a common failure cause)
@@ -42,6 +43,7 @@ A small HTTP API that sends and receives SMS through a USB GSM modem.
    | `SMSC` | (empty) | SMS center number; leave empty to use the SIM's |
    | `USSD_BALANCE_CODE` | `*0800#` | USSD code for the balance check |
    | `REDIS_HOST` / `REDIS_PORT` / `REDIS_PASSWORD` | `127.0.0.1` / `6379` / — | Redis connection |
+   | `DB_PATH` | `./gateway.db` | SQLite database file |
 
 2. **Install dependencies**
 
@@ -129,9 +131,9 @@ Validation errors return `400` with `{ "success": false, "message": "..." }`.
 
 `status` is one of `pending`, `retrying`, `sent`, `failed`, `unconfirmed`. On `retrying`/`failed`, `error` contains the last modem error. `unconfirmed` means the message was handed to the modem but the confirmation timed out — it is **not retried** (a retry could deliver the SMS twice); check the recipient or the modem before re-sending manually.
 
-### GET `/sms/messages` — read inbox
+### GET `/sms/messages` — fetch new messages from the modem
 
-Reads all SMS stored on the SIM and deletes **only the messages that were read** (a message arriving during the read is kept for next time).
+Reads all SMS stored on the SIM/device, **saves them to the database**, then deletes only the messages that were read (a message arriving during the read is kept for next time; if the DB write fails, nothing is deleted).
 
 ```json
 {
@@ -139,6 +141,21 @@ Reads all SMS stored on the SIM and deletes **only the messages that were read**
   "data": {
     "messages": [
       { "status": "REC UNREAD", "from": "+99361234567", "date": "26/07/06,12:30:00+20", "text": "Hi" }
+    ]
+  }
+}
+```
+
+### GET `/sms/inbox` — browse stored received messages
+
+Query params: `limit` (default 50, max 500), `offset`. Newest first.
+
+```json
+{
+  "success": true,
+  "data": {
+    "messages": [
+      { "id": 3, "from": "+99361234567", "date": "26/07/06/12/30/00/+20", "text": "Hi", "receivedAt": "2026-07-06T12:30:05.000Z" }
     ]
   }
 }
@@ -187,8 +204,8 @@ pm2 save
 
 Notes:
 
-- Run a single instance only (no pm2 `-i`/cluster mode) — the delivery log and the modem are single-process resources.
-- `sent.json` grows over time; rotate or archive it periodically if you send a lot.
+- Run a single instance only (no pm2 `-i`/cluster mode) — the database and the modem are single-process resources.
+- All message history lives in `gateway.db` (SQLite, WAL mode) — back it up by copying the file. A legacy `sent.json` is imported automatically on first start and renamed to `sent.json.imported`.
 - The gateway shuts down cleanly on `SIGINT`/`SIGTERM` (closes the queue and the serial port).
 - If a send confirmation times out, the job is **not retried** (the message may already be delivered); the log entry is marked `unconfirmed` for manual follow-up.
 - After a definitive send failure the SIM balance is checked via USSD, at most once per 10 minutes.

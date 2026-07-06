@@ -3,6 +3,7 @@ const crypto = require('crypto');
 const modem = require('../utils/driver');
 const { PHONE_RE } = require('../utils/sms-encoding');
 const { appendLog, updateLog, getLog } = require('../store/log-store');
+const { saveReceived, listReceived } = require('../store/inbox-store');
 const { sendSMSQueue } = require('../config/bull.config');
 
 const router = Router();
@@ -87,10 +88,22 @@ router.get('/status/:id', async (req, res) => {
 
 router.get('/messages', async (req, res) => {
   try {
-    const messages = await modem.getMessages();
+    // saved to the DB before the driver deletes them from the modem
+    const messages = await modem.getMessages(saveReceived);
     return res.json({ success: true, data: { messages } });
   } catch (err) {
     return res.status(err.status || 500).json({ success: false, message: err.message });
+  }
+});
+
+router.get('/inbox', async (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit, 10) || 50, 500);
+    const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
+    const messages = await listReceived({ limit, offset });
+    return res.json({ success: true, data: { messages } });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
   }
 });
 

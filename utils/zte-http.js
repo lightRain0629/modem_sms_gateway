@@ -153,7 +153,12 @@ exports.sendSMS = (to, message) =>
     throw err;
   });
 
-exports.getMessages = () =>
+/**
+ * Read all inbox messages. If `persist` is given it is awaited with the
+ * parsed messages BEFORE they are deleted from the modem — if it throws,
+ * nothing is deleted and the messages stay on the device for the next read.
+ */
+exports.getMessages = (persist) =>
   enqueue(async () => {
     const data = await getCmd(
       'sms_data_total',
@@ -172,6 +177,10 @@ exports.getMessages = () =>
       // returned empty and then deleted below
       text: ucs2Decode(m.content) || String(m.content ?? ''),
     }));
+
+    if (messages.length > 0 && persist) {
+      await persist(messages);
+    }
 
     // delete only what we actually read
     if (inbox.length > 0) {
