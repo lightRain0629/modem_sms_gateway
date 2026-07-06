@@ -1,105 +1,111 @@
 const { Router } = require('express');
-const {  getMessages } = require('../utils/send-sms.util');
-const fs = require('fs').promises;
-const path = require('path');
+const crypto = require('crypto');
+const modem = require('../utils/driver');
+const { PHONE_RE } = require('../utils/sms-encoding');
+const { appendLog, updateLog, getLog } = require('../store/log-store');
 const { sendSMSQueue } = require('../config/bull.config');
+
 const router = Router();
 
-router.post('/send-sms', async (req, res) => {
+// control chars other than \n and \r would corrupt the AT dialogue
+const CONTROL_CHARS_RE = /[\x00-\x09\x0B\x0C\x0E-\x1F]/;
 
-    const { to, message, projectName } = req.body;
-    const logsPath = path.join(__dirname, '..', 'sent.json');
-    const logEntry = {
-        id: (typeof require('crypto').randomUUID === 'function') ? require('crypto').randomUUID() : require('crypto').randomBytes(8).toString('hex'),
-        timestamp: new Date().toISOString(),
-        to: to,
-        message: message,
-        projectName: projectName || null,
-        ip: req.ip,
-        status: 'pending'
-    };
+function validateSend(req, res, next) {
+  const body = req.body || {};
+  const to = typeof body.to === 'string' ? body.to.trim() : '';
+  const { message, projectName } = body;
 
-    try {
-        let logs = [];
-        try {
-            const content = await fs.readFile(logsPath, 'utf8');
-            logs = JSON.parse(content);
-            if (!Array.isArray(logs)) logs = [];
-        } catch (e) {
-            // file doesn't exist or is invalid -> start with empty array
-        }
-        logs.push(logEntry);
-        await fs.writeFile(logsPath, JSON.stringify(logs, null, 2), 'utf8');
+  if (!PHONE_RE.test(to)) {
+    return res.status(400).json({
+      success: false,
+      message: 'to must be a phone number in international format, e.g. +99361234567',
+    });
+  }
+  if (typeof message !== 'string' || message.trim().length === 0) {
+    return res.status(400).json({ success: false, message: 'Message content is required' });
+  }
+  if (CONTROL_CHARS_RE.test(message)) {
+    return res
+      .status(400)
+      .json({ success: false, message: 'Message contains unsupported control characters' });
+  }
+  if (typeof projectName !== 'string' || projectName.trim().length === 0) {
+    return res.status(400).json({ success: false, message: 'Project name is required' });
+  }
 
-        await sendSMSQueue.add({ to, message, id: logEntry.id }, { delay: 5000 });
-        return res.json({ 
-                    success: true, 
-                    data: { 
-                        message: 'SMS queued for sending', 
-                        logId: logEntry.id 
-                    } 
-                });
-    } catch (err) {
-        return res.status(err.status || 500).json({ success: false, message: err.message });
-    }
+  const info = modem.analyzeMessage(message);
+  if (!info.ok) {
+    return res.status(400).json({
+      success: false,
+      message: `Message too long: ${info.length} of max ${info.maxLength} characters (${info.encoding} encoding)`,
+    });
+  }
+
+  req.body.to = to;
+  next();
+}
+
+router.post('/send', validateSend, async (req, res) => {
+  const { to, message, projectName } = req.body;
+  const logEntry = {
+    id: crypto.randomUUID(),
+    timestamp: new Date().toISOString(),
+    to,
+    message,
+    projectName,
+    ip: req.ip,
+    status: 'pending',
+    error: null,
+  };
+
+  try {
+    await appendLog(logEntry);
+    await sendSMSQueue.add('send-sms', { to, message, projectName, logId: logEntry.id });
+    return res.status(202).json({
+      success: true,
+      data: { message: 'SMS queued for sending', logId: logEntry.id },
+    });
+  } catch (err) {
+    // the entry may already be persisted as 'pending' — don't leave it
+    // claiming an in-flight send that was never enqueued
+    await updateLog(logEntry.id, { status: 'failed', error: err.message }).catch(() => {});
+    return res.status(500).json({ success: false, message: err.message });
+  }
 });
 
-router.get('/get-messages', async (req, res) => {
-    try {
-        const messages = await getMessages();
-        try {
-            const takenPath = path.join(__dirname, '..', 'taken.json');
-            const takenContent = await fs.readFile(takenPath, 'utf8');
-            let takenData = JSON.parse(takenContent);
-
-            const takenMap = new Map();
-
-            if (Array.isArray(takenData)) {
-                for (const item of takenData) {
-                    if (typeof item === 'string') {
-                        takenMap.set(item, true);
-                    } else if (item && (item.id || item._id)) {
-                        takenMap.set(item.id || item._id, item);
-                    }
-                }
-            } else if (takenData && typeof takenData === 'object') {
-                for (const [k, v] of Object.entries(takenData)) {
-                    takenMap.set(k, v);
-                }
-            }
-
-            for (const msg of messages) {
-                const key = msg.id || msg._id || msg.messageId || msg.uuid;
-                const t = key ? takenMap.get(key) : undefined;
-                if (t !== undefined) {
-                    msg.taken = true;
-                    if (typeof t === 'object' && t !== true) msg.takenInfo = t;
-                } else {
-                    msg.taken = false;
-                }
-            }
-        } catch (e) {
-            // ignore missing/invalid taken.json and return messages unchanged
-        }
-        res.json({ success: true, data:{messages} });
-    } catch (err) {
-        res.status(err.status || 500).json({ success: false, error: err.message });
+router.get('/status/:id', async (req, res) => {
+  try {
+    const entry = await getLog(req.params.id);
+    if (!entry) {
+      return res.status(404).json({ success: false, message: 'Log entry not found' });
     }
+    return res.json({ success: true, data: entry });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+router.get('/messages', async (req, res) => {
+  try {
+    const messages = await modem.getMessages();
+    return res.json({ success: true, data: { messages } });
+  } catch (err) {
+    return res.status(err.status || 500).json({ success: false, message: err.message });
+  }
 });
 
 router.get('/health', async (req, res) => {
-    try {
-        
-        res.json({ 
-            success: true, 
-            data: {
-                message: "I'm alone, bro. Thank you for remembering me.",
-                status: "ok"
-            } 
-        });
-    } catch (err) {
-        res.status(err.status || 500).json({ success: false, error: err.message });
-    }
+  const modemOk = modem.isConnected() && (await modem.ping().catch(() => false));
+  // Always 200: the API can queue (and later retry) sends while the modem
+  // reconnects, so a non-200 would make a load balancer pull a working
+  // instance. Monitors that care about the modem should read data.modem.
+  return res.json({
+    success: true,
+    data: {
+      status: modemOk ? 'ok' : 'degraded',
+      modem: modemOk ? 'connected' : 'unavailable',
+    },
+  });
 });
 
 module.exports = router;
