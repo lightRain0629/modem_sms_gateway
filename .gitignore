@@ -1,2 +1,5 @@
 node_modules/
 .env
+sent.json
+sent.json.tmp
+.DS_Store
