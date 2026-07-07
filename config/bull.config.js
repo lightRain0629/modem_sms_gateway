@@ -1,6 +1,6 @@
 const { Queue, Worker, UnrecoverableError } = require('bullmq');
 const { SENDMESSAGEQUEUE } = require('../constants/queue.const');
-const modem = require('../utils/driver');
+const pool = require('../utils/pool');
 const { updateLog } = require('../store/log-store');
 
 const connection = {
@@ -29,29 +29,43 @@ sendSMSQueue.on('error', (err) => {
 
 // The serial driver connects asynchronously; jobs persisted in Redis across a
 // reboot would otherwise burn all their attempts before the port opens.
-async function waitForModem() {
+async function waitForModem(modem) {
   const deadline = Date.now() + MODEM_READY_TIMEOUT_MS;
   while (!modem.isConnected() && Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 500));
   }
 }
 
-// concurrency stays 1: the modem can only handle one send at a time.
+// Each modem can only handle one send at a time (per-modem serializer inside
+// the drivers); worker concurrency matches the pool size so different modems
+// can transmit simultaneously.
 // Throwing here is intentional: it marks the job failed so BullMQ retries it.
 const worker = new Worker(
   SENDMESSAGEQUEUE,
   async (job) => {
-    const { to, message, logId } = job.data;
-    await waitForModem();
+    const { to, message, logId, modem: modemId } = job.data;
+
+    let modem;
+    if (modemId) {
+      modem = pool.get(modemId);
+      if (!modem) {
+        // retrying can't fix a modem that isn't configured
+        throw new UnrecoverableError(`Unknown modem "${modemId}"`);
+      }
+    } else {
+      modem = pool.pick();
+    }
+    await waitForModem(modem);
 
     let result;
     try {
       result = await modem.sendSMS(to, message);
     } catch (err) {
+      err.modemId = modem.id; // lets the failed handler check the right SIM's balance
       if (err.confirmTimeout) {
         // the message may already be with the network — retrying could
         // double-send, so fail permanently instead
-        throw new UnrecoverableError(`Send unconfirmed: ${err.message}`);
+        throw new UnrecoverableError(`Send unconfirmed via "${modem.id}": ${err.message}`);
       }
       throw err;
     }
@@ -61,35 +75,39 @@ const worker = new Worker(
         status: 'sent',
         sentAt: new Date().toISOString(),
         reference: result.reference,
+        modemId: modem.id,
         error: null,
       });
     } catch (e) {
       // never fail (and re-send) a delivered SMS over a log write error
       console.error('[queue] log update failed after send:', e.message);
     }
-    return { logId, reference: result.reference };
+    return { logId, reference: result.reference, modemId: modem.id };
   },
-  { connection, concurrency: 1 }
+  { connection, concurrency: Math.max(1, pool.size()) }
 );
 
 worker.on('error', (err) => {
   console.error('[worker] error:', err.message);
 });
 
-worker.on('completed', (job) => {
-  console.log(`[queue] job ${job.id} sent (log ${job.data.logId})`);
+worker.on('completed', (job, result) => {
+  console.log(`[queue] job ${job.id} sent via "${result.modemId}" (log ${job.data.logId})`);
 });
 
-let lastBalanceCheckAt = 0;
-async function maybeCheckBalance() {
+const lastBalanceCheckAt = new Map(); // modem id -> timestamp
+async function maybeCheckBalance(modemId) {
+  const modem = modemId ? pool.get(modemId) : null;
+  if (!modem) return;
   // a failing backlog would otherwise queue a 20-30s USSD session on the
   // modem mutex for every failed job
-  if (Date.now() - lastBalanceCheckAt < BALANCE_CHECK_MIN_INTERVAL_MS) return;
-  lastBalanceCheckAt = Date.now();
+  const last = lastBalanceCheckAt.get(modem.id) || 0;
+  if (Date.now() - last < BALANCE_CHECK_MIN_INTERVAL_MS) return;
+  lastBalanceCheckAt.set(modem.id, Date.now());
   try {
     await modem.checkBalance();
   } catch (e) {
-    console.error('[queue] balance check failed:', e.message);
+    console.error(`[queue] balance check failed on "${modem.id}":`, e.message);
   }
 }
 
@@ -109,6 +127,7 @@ worker.on('failed', async (job, err) => {
     await updateLog(job.data.logId, {
       status: unconfirmed ? 'unconfirmed' : isFinal ? 'failed' : 'retrying',
       error: err.message,
+      ...(err.modemId ? { modemId: err.modemId } : {}),
     });
   } catch (e) {
     console.error('[queue] could not update log:', e.message);
@@ -116,7 +135,7 @@ worker.on('failed', async (job, err) => {
 
   if (isFinal && !unconfirmed) {
     // a common cause of definite send failures is an empty SIM balance
-    await maybeCheckBalance();
+    await maybeCheckBalance(err.modemId);
   }
 });
 

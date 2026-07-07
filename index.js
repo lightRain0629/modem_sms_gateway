@@ -10,7 +10,7 @@ if (!process.env.API_KEY) {
 }
 
 const router = require('./router/router');
-const modem = require('./utils/driver');
+const pool = require('./utils/pool');
 const { sendSMSQueue, worker } = require('./config/bull.config');
 const { serverAdapter } = require('./config/bull-board.config');
 
@@ -76,9 +76,9 @@ async function shutdown(signal) {
     console.error('error closing queue:', e.message);
   }
   try {
-    await modem.close();
+    await pool.closeAll();
   } catch (e) {
-    console.error('error closing modem:', e.message);
+    console.error('error closing modems:', e.message);
   }
   process.exit(0);
 }
