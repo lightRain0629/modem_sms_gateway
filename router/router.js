@@ -96,10 +96,14 @@ router.get('/messages', async (req, res) => {
   }
 });
 
+// clamp to 1..500 — a negative LIMIT means "unlimited" to SQLite
+const parseLimit = (v) => Math.min(Math.max(parseInt(v, 10) || 50, 1), 500);
+const parseOffset = (v) => Math.max(parseInt(v, 10) || 0, 0);
+
 router.get('/inbox', async (req, res) => {
   try {
-    const limit = Math.min(parseInt(req.query.limit, 10) || 50, 500);
-    const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
+    const limit = parseLimit(req.query.limit);
+    const offset = parseOffset(req.query.offset);
     const messages = await listReceived({ limit, offset });
     return res.json({ success: true, data: { messages } });
   } catch (err) {
@@ -109,8 +113,8 @@ router.get('/inbox', async (req, res) => {
 
 router.get('/sent', async (req, res) => {
   try {
-    const limit = Math.min(parseInt(req.query.limit, 10) || 50, 500);
-    const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
+    const limit = parseLimit(req.query.limit);
+    const offset = parseOffset(req.query.offset);
     // only plain strings — a repeated query param arrives as an array
     const filter = (v) => (typeof v === 'string' ? v : undefined);
     const { messages, total } = await listSent({
