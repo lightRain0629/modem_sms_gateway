@@ -2,7 +2,7 @@ const { Router } = require('express');
 const crypto = require('crypto');
 const modem = require('../utils/driver');
 const { PHONE_RE } = require('../utils/sms-encoding');
-const { appendLog, updateLog, getLog } = require('../store/log-store');
+const { appendLog, updateLog, getLog, listSent, getMetrics } = require('../store/log-store');
 const { saveReceived, listReceived } = require('../store/inbox-store');
 const { sendSMSQueue } = require('../config/bull.config');
 
@@ -38,7 +38,7 @@ function validateSend(req, res, next) {
   if (!info.ok) {
     return res.status(400).json({
       success: false,
-      message: `Message too long: ${info.length} of max ${info.maxLength} characters (${info.encoding} encoding)`,
+      message: `Message too long: ${info.length} of max ${info.maxLength} characters (${info.encoding} encoding, up to 3 concatenated SMS)`,
     });
   }
 
@@ -96,12 +96,43 @@ router.get('/messages', async (req, res) => {
   }
 });
 
+// clamp to 1..500 — a negative LIMIT means "unlimited" to SQLite
+const parseLimit = (v) => Math.min(Math.max(parseInt(v, 10) || 50, 1), 500);
+const parseOffset = (v) => Math.max(parseInt(v, 10) || 0, 0);
+
 router.get('/inbox', async (req, res) => {
   try {
-    const limit = Math.min(parseInt(req.query.limit, 10) || 50, 500);
-    const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
+    const limit = parseLimit(req.query.limit);
+    const offset = parseOffset(req.query.offset);
     const messages = await listReceived({ limit, offset });
     return res.json({ success: true, data: { messages } });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+router.get('/sent', async (req, res) => {
+  try {
+    const limit = parseLimit(req.query.limit);
+    const offset = parseOffset(req.query.offset);
+    // only plain strings — a repeated query param arrives as an array
+    const filter = (v) => (typeof v === 'string' ? v : undefined);
+    const { messages, total } = await listSent({
+      limit,
+      offset,
+      status: filter(req.query.status),
+      projectName: filter(req.query.projectName),
+      to: filter(req.query.to),
+    });
+    return res.json({ success: true, data: { messages, total, limit, offset } });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+router.get('/metrics', async (req, res) => {
+  try {
+    return res.json({ success: true, data: await getMetrics() });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }
