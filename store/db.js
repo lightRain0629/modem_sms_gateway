@@ -36,6 +36,16 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_recv_received_at ON received_messages(received_at);
 `);
 
+// Migration for databases created before multi-modem support.
+function addColumnIfMissing(table, column, ddl) {
+  const has = db
+    .prepare('SELECT 1 FROM pragma_table_info(?) WHERE name = ?')
+    .get(table, column);
+  if (!has) db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+}
+addColumnIfMissing('sent_messages', 'modem_id', 'modem_id TEXT');
+addColumnIfMissing('received_messages', 'modem_id', 'modem_id TEXT');
+
 // One-time migration from the old sent.json log. Runs only when the table is
 // empty; the file is renamed afterwards so it never imports twice.
 function migrateLegacyLog() {
