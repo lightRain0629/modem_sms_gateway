@@ -10,7 +10,9 @@ const CMD_TIMEOUT_MS = 10000;
 const SMS_SEND_TIMEOUT_MS = 30000;
 const USSD_TIMEOUT_MS = 20000;
 
-const { analyzeMessage, ucs2Hex, PHONE_RE } = require('./sms-encoding');
+const crypto = require('crypto');
+const { analyzeMessage, splitMessage, ucs2Hex, PHONE_RE } = require('./sms-encoding');
+const { buildConcatPdus } = require('./pdu');
 const createSerializer = require('./serialize');
 
 function sleep(ms) {
@@ -226,6 +228,80 @@ exports.ping = () =>
     return true;
   });
 
+/** Submit one message body at the "> " prompt and wait for +CMGS/OK. */
+async function submitBody(atCommand, label, body) {
+  try {
+    await transact({ write: atCommand, label, expectPrompt: true });
+  } catch (err) {
+    // ESC cancels a possibly still-open body prompt so the modem
+    // doesn't swallow the next AT command as message text
+    try { port && port.write('\x1B'); } catch (_) { /* port already gone */ }
+    throw err;
+  }
+  try {
+    const lines = await transact({
+      write: body + '\x1A', // Ctrl+Z terminates the body
+      label: `${label} body`,
+      timeoutMs: SMS_SEND_TIMEOUT_MS,
+    });
+    return lines.find((l) => l.startsWith('+CMGS')) || null;
+  } catch (err) {
+    // the body was already handed to the modem: a timeout here means the
+    // network may still deliver it, so a retry could double-send
+    if (err.code === 'TIMEOUT') err.confirmTimeout = true;
+    throw err;
+  }
+}
+
+// Single SMS: AT text mode, as before.
+async function sendSingle(to, message, info) {
+  await transact({ write: 'AT+CMGF=1\r', label: 'CMGF' });
+  if (SMSC) {
+    await transact({ write: `AT+CSCA="${SMSC}"\r`, label: 'CSCA' });
+  }
+
+  let address = to;
+  let body = message;
+  if (info.encoding === 'UCS2') {
+    await transact({ write: 'AT+CSCS="UCS2"\r', label: 'CSCS' });
+    await transact({ write: 'AT+CSMP=17,167,0,8\r', label: 'CSMP' });
+    address = ucs2Hex(to);
+    body = ucs2Hex(message);
+  } else {
+    await transact({ write: 'AT+CSCS="GSM"\r', label: 'CSCS' });
+    await transact({ write: 'AT+CSMP=17,167,0,0\r', label: 'CSMP' });
+  }
+
+  const ref = await submitBody(`AT+CMGS="${address}"\r`, 'CMGS', body);
+  return { reference: ref };
+}
+
+// Concatenated SMS: text mode has no way to attach the UDH concatenation
+// header, so multipart goes through PDU mode. A mid-message failure leaves
+// the parts already sent unassembled on the recipient's phone (they are
+// discarded there); a retry re-sends all parts under a fresh reference.
+async function sendMultipart(to, message, info) {
+  const pdus = buildConcatPdus({
+    to,
+    parts: splitMessage(message),
+    encoding: info.encoding,
+    ref: crypto.randomInt(256),
+    smsc: SMSC || null,
+  });
+
+  await transact({ write: 'AT+CMGF=0\r', label: 'CMGF=0' });
+  try {
+    const refs = [];
+    for (const { pdu, length } of pdus) {
+      refs.push(await submitBody(`AT+CMGS=${length}\r`, 'CMGS (PDU)', pdu));
+    }
+    return { reference: refs.filter(Boolean).join('; ') || null };
+  } finally {
+    // restore text mode for the inbox reader; best effort
+    await transact({ write: 'AT+CMGF=1\r', label: 'CMGF=1' }).catch(() => {});
+  }
+}
+
 exports.sendSMS = (to, message) =>
   enqueue(async () => {
     if (!PHONE_RE.test(to)) {
@@ -233,52 +309,13 @@ exports.sendSMS = (to, message) =>
     }
     const info = analyzeMessage(message);
     if (!info.ok) {
-      throw new Error(`Message too long: ${info.length}/${info.maxLength} (${info.encoding})`);
+      throw new Error(
+        `Message too long: ${info.length}/${info.maxLength} (${info.encoding}, max 3 SMS parts)`
+      );
     }
-
-    await transact({ write: 'AT+CMGF=1\r', label: 'CMGF' });
-    if (SMSC) {
-      await transact({ write: `AT+CSCA="${SMSC}"\r`, label: 'CSCA' });
-    }
-
-    let address = to;
-    let body = message;
-    if (info.encoding === 'UCS2') {
-      await transact({ write: 'AT+CSCS="UCS2"\r', label: 'CSCS' });
-      await transact({ write: 'AT+CSMP=17,167,0,8\r', label: 'CSMP' });
-      address = ucs2Hex(to);
-      body = ucs2Hex(message);
-    } else {
-      await transact({ write: 'AT+CSCS="GSM"\r', label: 'CSCS' });
-      await transact({ write: 'AT+CSMP=17,167,0,0\r', label: 'CSMP' });
-    }
-
-    try {
-      await transact({
-        write: `AT+CMGS="${address}"\r`,
-        label: 'CMGS',
-        expectPrompt: true,
-      });
-    } catch (err) {
-      // ESC cancels a possibly still-open body prompt so the modem
-      // doesn't swallow the next AT command as message text
-      try { port && port.write('\x1B'); } catch (_) { /* port already gone */ }
-      throw err;
-    }
-    try {
-      const lines = await transact({
-        write: body + '\x1A', // Ctrl+Z terminates the message body
-        label: 'CMGS body',
-        timeoutMs: SMS_SEND_TIMEOUT_MS,
-      });
-      const ref = lines.find((l) => l.startsWith('+CMGS'));
-      return { reference: ref || null };
-    } catch (err) {
-      // the body was already handed to the modem: a timeout here means the
-      // network may still deliver it, so a retry could double-send
-      if (err.code === 'TIMEOUT') err.confirmTimeout = true;
-      throw err;
-    }
+    return info.segments === 1
+      ? sendSingle(to, message, info)
+      : sendMultipart(to, message, info);
   });
 
 /**

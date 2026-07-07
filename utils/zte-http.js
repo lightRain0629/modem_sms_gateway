@@ -3,7 +3,7 @@
  * a goform HTTP API instead of an AT serial port. Same interface as ./modem.js.
  */
 const http = require('http');
-const { ucs2Hex, ucs2Decode, PHONE_RE } = require('./sms-encoding');
+const { ucs2Hex, ucs2Decode, PHONE_RE, MAX_SEGMENTS, LIMITS } = require('./sms-encoding');
 const createSerializer = require('./serialize');
 
 const HOST = process.env.ZTE_HOST || '192.168.0.1';
@@ -99,12 +99,22 @@ function smsTime() {
 // queue job and an HTTP request never interleave send/read/delete calls.
 const enqueue = createSerializer();
 
-// This driver always transmits UCS2 (see sendSMS), so a single SMS holds 70
-// chars regardless of charset — expose that limit to the validation layer
-// instead of the shared 160-char GSM limit this driver can't honor.
+// This driver always transmits UCS2 (see sendSMS), so the limits are 70 chars
+// for a single SMS and 67 per concatenated part regardless of charset —
+// expose that to the validation layer instead of the shared 160-char GSM
+// limit this driver can't honor. The firmware splits long bodies into
+// concatenated parts itself (same as the stick's own web UI).
 function analyzeUcs2(message) {
   const length = message.length;
-  return { encoding: 'UCS2', length, maxLength: 70, ok: length <= 70 };
+  const segments =
+    length <= LIMITS.UCS2_SINGLE ? 1 : Math.ceil(length / LIMITS.UCS2_PER_SEGMENT);
+  return {
+    encoding: 'UCS2',
+    length,
+    segments,
+    maxLength: LIMITS.UCS2_PER_SEGMENT * MAX_SEGMENTS,
+    ok: segments <= MAX_SEGMENTS,
+  };
 }
 
 exports.analyzeMessage = analyzeUcs2;
@@ -124,7 +134,9 @@ exports.sendSMS = (to, message) =>
     }
     const info = analyzeUcs2(message);
     if (!info.ok) {
-      throw new Error(`Message too long: ${info.length}/${info.maxLength} (${info.encoding})`);
+      throw new Error(
+        `Message too long: ${info.length}/${info.maxLength} (${info.encoding}, max ${MAX_SEGMENTS} SMS parts)`
+      );
     }
 
     await setCmd({
@@ -137,8 +149,9 @@ exports.sendSMS = (to, message) =>
       encode_type: 'UNICODE', // this firmware rejects mixed-case 'Unicode'
     });
 
-    // poll delivery status: 1 = sending, 3 = sent, 2 = failed
-    const deadline = Date.now() + SEND_POLL_TIMEOUT_MS;
+    // poll delivery status: 1 = sending, 3 = sent, 2 = failed.
+    // A multipart message transmits one SMS per segment — scale the wait.
+    const deadline = Date.now() + SEND_POLL_TIMEOUT_MS * info.segments;
     while (Date.now() < deadline) {
       await sleep(POLL_INTERVAL_MS);
       const st = await getCmd('sms_cmd_status_info', '&sms_cmd=4');

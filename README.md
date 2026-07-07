@@ -12,6 +12,7 @@ A small HTTP API that sends and receives SMS through a USB GSM modem.
 - **SQLite storage** (`gateway.db`, via better-sqlite3): every outbound SMS with its delivery status, and every inbound SMS (persisted *before* it is deleted from the modem)
 - Delivery log in `sent.json` with per-message status: `pending → sent` or `pending → retrying → failed`
 - Messages that don't fit the GSM-7 charset (e.g. Cyrillic) are sent as UCS2 automatically
+- Long messages are sent as **concatenated SMS** (up to 3 parts, recipient sees one message): serial driver via PDU mode, zte-http via the firmware's own segmentation
 - After a message finally fails, the gateway checks the SIM balance via USSD (a common failure cause)
 
 ## Requirements
@@ -93,7 +94,15 @@ Request body:
 ```
 
 - `to` — international format, 7–15 digits, optional leading `+`
-- `message` — serial driver: max 160 chars for plain GSM text, 70 if it contains non-Latin characters (sent as UCS2); zte-http driver: max 70 chars always (this firmware family sends everything as UCS2)
+- `message` — a message longer than one SMS is sent as a concatenated SMS of up to **3 parts** (the recipient sees a single message; the carrier bills one SMS per part). Limits:
+
+  | Driver | Charset | 1 part | max (3 parts) |
+  |---|---|---|---|
+  | serial | GSM-7 (plain Latin) | 160 | 459 (153/part) |
+  | serial | UCS2 (e.g. Cyrillic) | 70 | 201 (67/part) |
+  | zte-http | always UCS2 | 70 | 201 (67/part) |
+
+  Concatenated parts are shorter than a single SMS because each part carries a 6-byte concatenation header.
 - `projectName` — required, stored in the delivery log
 
 > **Carrier content filtering:** some operators (observed with TMCell) silently reject messages containing `http` — the send fails at the network with no error detail. Avoid URLs in message bodies.
@@ -146,6 +155,39 @@ Reads all SMS stored on the SIM/device, **saves them to the database**, then del
 }
 ```
 
+### GET `/sms/sent` — browse the delivery log
+
+Query params: `limit` (default 50, max 500), `offset`, and optional equality filters `status`, `projectName`, `to`. Newest first; `total` is the count matching the filters.
+
+```json
+{
+  "success": true,
+  "data": {
+    "messages": [
+      { "id": "7edf5906-...", "timestamp": "2026-07-06T10:00:00.000Z", "to": "+99361234567", "message": "Hello", "projectName": "E-Center", "ip": "::1", "status": "sent", "sentAt": "2026-07-06T10:00:04.000Z", "reference": "+CMGS: 12", "error": null }
+    ],
+    "total": 128,
+    "limit": 50,
+    "offset": 0
+  }
+}
+```
+
+### GET `/sms/metrics` — delivery counters
+
+All-time and last-24h totals, broken down by status:
+
+```json
+{
+  "success": true,
+  "data": {
+    "total": 128,
+    "byStatus": { "sent": 120, "failed": 5, "unconfirmed": 1, "pending": 2 },
+    "last24h": { "total": 12, "byStatus": { "sent": 11, "failed": 1 } }
+  }
+}
+```
+
 ### GET `/sms/inbox` — browse stored received messages
 
 Query params: `limit` (default 50, max 500), `offset`. Newest first.
@@ -190,7 +232,7 @@ curl http://localhost:3000/sms/status/<logId> -H "x-api-key: YOUR_API_KEY"
 ## How sending works
 
 1. `POST /sms/send` validates the request, writes a `pending` entry to `sent.json`, and adds a job to the BullMQ queue.
-2. The worker takes jobs one at a time (the modem can only do one thing at once) and runs the AT dialogue: `AT+CMGF=1` → charset/encoding setup → `AT+CMGS` → message body + Ctrl+Z → waits for the modem's `+CMGS`/`OK` confirmation.
+2. The worker takes jobs one at a time (the modem can only do one thing at once) and runs the AT dialogue: `AT+CMGF=1` → charset/encoding setup → `AT+CMGS` → message body + Ctrl+Z → waits for the modem's `+CMGS`/`OK` confirmation. A multipart message switches to PDU mode (`AT+CMGF=0`) and submits one SMS-SUBMIT PDU per part, all sharing a concatenation reference; the zte-http driver instead hands the full body to the firmware, which segments it itself.
 3. On success the log entry becomes `sent`. On error the job is retried up to 3 times with exponential backoff (10s, 20s, 40s); after the last failure the entry becomes `failed` and the gateway runs the USSD balance check.
 
 ## Running in production
@@ -210,7 +252,17 @@ Notes:
 - If a send confirmation times out, the job is **not retried** (the message may already be delivered); the log entry is marked `unconfirmed` for manual follow-up.
 - After a definitive send failure the SIM balance is checked via USSD, at most once per 10 minutes.
 
+## Tests
+
+```bash
+npm test
+```
+
+Unit tests (Node's built-in `node:test`, no extra dependencies) cover the GSM-7/UCS2 encoding analysis and message splitting, the PDU builder (including the classic `hellohello` reference vector), and the SQLite stores against a throwaway database.
+
 ## Known limitations
 
 - Serial driver: an inbound SMS containing a line that is exactly `OK` or `ERROR` can end an inbox listing early (AT text mode makes these indistinguishable from response terminators).
-- No multipart/concatenated SMS — messages are limited to a single SMS (see length limits above).
+- Concatenated SMS is capped at 3 parts (see length limits above).
+- Serial driver, multipart: if a part fails mid-message, the parts already sent are never assembled by the recipient's phone (they are eventually discarded); a retry re-sends all parts under a fresh concatenation reference.
+- zte-http driver, multipart: relies on the firmware segmenting long bodies (the same mechanism its own web UI uses); verified message-level status comes from the same send-status poll as single SMS.
