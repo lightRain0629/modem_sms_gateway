@@ -38,6 +38,7 @@ A small HTTP API that sends and receives SMS through one or more USB GSM modems.
    |---|---|---|
    | `PORT` | `3000` | HTTP server port |
    | `API_KEY` | — (required) | Key clients must send on every request |
+   | `DASHBOARD_USER` / `DASHBOARD_PASSWORD` | (empty) | Login for the queue dashboard at `/admin/queues`; set both or neither. Unset: the dashboard falls back to any username + `API_KEY` as password |
    | `MODEMS` | (empty) | JSON array describing the modem fleet (see below); when set, the four single-modem variables that follow are ignored |
    | `MODEM_DRIVER` | `serial` | single-modem mode: `serial` or `zte-http` |
    | `USB_PORT` | `/dev/ttyUSB0` | serial driver: modem port (`ls /dev/ttyUSB*`) |
@@ -246,7 +247,13 @@ Runs the `USSD_BALANCE_CODE` session on every modem (or one modem with `?modem=<
 
 ### Queue dashboard — `/admin/queues`
 
-Bull Board UI showing waiting/active/delayed/failed jobs, with retry and inspection controls. Open it in a browser and log in with **any username** and the **`API_KEY` as password** (HTTP Basic Auth).
+Bull Board UI showing waiting/active/delayed/failed jobs, with retry and inspection controls. Open it in a browser and log in with **`DASHBOARD_USER` / `DASHBOARD_PASSWORD`** (HTTP Basic Auth). Keeping these separate from `API_KEY` means dashboard access can be shared or revoked without rotating the key across every client project. When they are unset the dashboard falls back to the legacy login — any username, `API_KEY` as password — and logs a warning on startup.
+
+### API reference — `/docs`
+
+Interactive [Scalar](https://scalar.com) reference for every endpoint, with request/response schemas and a built-in "try it" client (enter the `API_KEY` once under Auth). The docs pages are public — the spec contains no secrets; actual API calls still require the key.
+
+The underlying OpenAPI 3.1 spec is the checked-in [`openapi.json`](openapi.json), also served at `/openapi.json` — import it into Postman/Insomnia or use it for client codegen. The docs page loads the Scalar bundle from its CDN, so the browser viewing it needs internet access; the spec itself is served locally. `npm test` checks the spec stays in sync with the router's routes.
 
 ### GET `/sms/health` — health check
 
