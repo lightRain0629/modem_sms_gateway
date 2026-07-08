@@ -8,7 +8,8 @@
   "main": "index.js",
   "scripts": {
     "test": "node --test",
-    "start": "node index.js"
+    "start": "node index.js",
+    "dev": "cross-env NODE_ENV=development node --watch index.js"
   },
   "dependencies": {
     "@bull-board/api": "^8.1.0",
@@ -18,5 +19,8 @@
     "dotenv": "^17.2.3",
     "express": "^5.1.0",
     "serialport": "^13.0.0"
+  },
+  "devDependencies": {
+    "cross-env": "^10.1.0"
   }
 }
