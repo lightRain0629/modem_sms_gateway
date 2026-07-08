@@ -3,7 +3,7 @@
  * a goform HTTP API instead of an AT serial port. Same interface as ./modem.js.
  *
  * createZteModem(config) returns an independent instance; config:
- *   { id, host, ussdBalanceCode, ussdTariffCode }
+ *   { id, host, ussdBalanceCode, ussdTariffCode, ussdNumberCode }
  */
 const http = require('http');
 const { ucs2Hex, ucs2Decode, PHONE_RE, MAX_SEGMENTS, LIMITS } = require('./sms-encoding');

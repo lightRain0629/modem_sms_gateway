@@ -53,12 +53,18 @@ async function enqueueUssd(modem, kind) {
     requestedAt: new Date().toISOString(),
   };
   await createRequest(request);
-  await ussdQueue.add('ussd', {
-    requestId: request.id,
-    modemId: modem.id,
-    kind,
-    code: request.code,
-  });
+  try {
+    await ussdQueue.add('ussd', {
+      requestId: request.id,
+      modemId: modem.id,
+      kind,
+      code: request.code,
+    });
+  } catch (err) {
+    // don't leave a pending row that no job will ever settle
+    await completeRequest(request.id, { status: 'failed', error: err.message }).catch(() => {});
+    throw err;
+  }
   return request;
 }
 

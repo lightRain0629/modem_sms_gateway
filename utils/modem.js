@@ -3,7 +3,7 @@
  *
  * createSerialModem(config) returns an independent instance so several sticks
  * can run in one process; config:
- *   { id, port, baudRate, smsc, ussdBalanceCode, ussdTariffCode }
+ *   { id, port, baudRate, smsc, ussdBalanceCode, ussdTariffCode, ussdNumberCode }
  */
 const { SerialPort } = require('serialport');
 const crypto = require('crypto');
