@@ -248,6 +248,12 @@ Runs the `USSD_BALANCE_CODE` session on every modem (or one modem with `?modem=<
 
 Bull Board UI showing waiting/active/delayed/failed jobs, with retry and inspection controls. Open it in a browser and log in with **any username** and the **`API_KEY` as password** (HTTP Basic Auth).
 
+### API reference — `/docs`
+
+Interactive [Scalar](https://scalar.com) reference for every endpoint, with request/response schemas and a built-in "try it" client (enter the `API_KEY` once under Auth). Same login as the queue dashboard: any username, `API_KEY` as password.
+
+The underlying OpenAPI 3.1 spec is the checked-in [`openapi.json`](openapi.json), also served at `/openapi.json` — import it into Postman/Insomnia or use it for client codegen. The docs page loads the Scalar bundle from its CDN, so the browser viewing it needs internet access; the spec itself is served locally. `npm test` checks the spec stays in sync with the router's routes.
+
 ### GET `/sms/health` — health check
 
 Probes every modem (an `AT` command on serial, a status query on zte-http). Always returns `200` — the API can still queue sends while modems reconnect — with the per-modem state in the body:

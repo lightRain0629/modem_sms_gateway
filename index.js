@@ -3,6 +3,7 @@ dotenv.config();
 
 const express = require('express');
 const crypto = require('crypto');
+const path = require('path');
 
 if (!process.env.API_KEY) {
   console.error('API_KEY is not set. Copy .env.example to .env and set a strong key.');
@@ -58,6 +59,29 @@ const checkBasicAuth = (req, res, next) => {
 };
 
 app.use('/admin/queues', checkBasicAuth, serverAdapter.getRouter());
+
+// API reference — Scalar UI (loaded from its CDN) over the checked-in
+// OpenAPI spec. Same login as the queue dashboard.
+const DOCS_HTML = `<!doctype html>
+<html>
+  <head>
+    <title>SMS Gateway — API Reference</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+  </head>
+  <body>
+    <div id="app"></div>
+    <script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference"></script>
+    <script>
+      Scalar.createApiReference('#app', { url: '/openapi.json' });
+    </script>
+  </body>
+</html>`;
+
+app.get('/openapi.json', checkBasicAuth, (req, res) =>
+  res.sendFile(path.join(__dirname, 'openapi.json'))
+);
+app.get('/docs', checkBasicAuth, (req, res) => res.type('html').send(DOCS_HTML));
 
 const server = app.listen(port, () => {
   console.log(`SMS API server running at http://localhost:${port}`);
