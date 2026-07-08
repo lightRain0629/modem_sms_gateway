@@ -110,3 +110,17 @@ test('inbox: saveReceived / listReceived / countReceived', async () => {
   await saveReceived([]); // no-op, must not throw
   assert.equal(await countReceived(), 2);
 });
+
+test('inbox: from filter matches the sender exactly', async () => {
+  await saveReceived([
+    { from: '0801', date: '26/07/08,10:00:00+20', text: 'Tarif: Talyp' },
+    { from: '0801', date: '26/07/08,10:00:05+20', text: 'Tarif: Internet' },
+  ]);
+
+  const fromCarrier = await listReceived({ from: '0801' });
+  assert.equal(fromCarrier.length, 2);
+  assert.ok(fromCarrier.every((m) => m.from === '0801'));
+
+  assert.equal((await listReceived({ from: '+99361111111' })).length, 1);
+  assert.equal((await listReceived({ from: 'nobody' })).length, 0);
+});

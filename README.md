@@ -14,7 +14,8 @@ A small HTTP API that sends and receives SMS through one or more USB GSM modems.
 - Per-message delivery status: `pending → sent` or `pending → retrying → failed`
 - Messages that don't fit the GSM-7 charset (e.g. Cyrillic) are sent as UCS2 automatically
 - Long messages are sent as **concatenated SMS** (up to 3 parts, recipient sees one message): serial driver via PDU mode, zte-http via the firmware's own segmentation
-- After a message finally fails, the gateway checks the SIM balance via USSD (a common failure cause)
+- **USSD subsystem**: balance and tariff codes run through their own queue (a USSD session takes 20–30 s and sometimes never replies), and every session is persisted to the database — `/sms/balance` answers instantly from the last known value, `/sms/ussd` is the full history
+- After a message finally fails, the gateway checks the SIM balance via USSD (a common failure cause); the result lands in the USSD history
 
 ## Requirements
 
@@ -46,7 +47,9 @@ A small HTTP API that sends and receives SMS through one or more USB GSM modems.
    | `ZTE_HOST` | `192.168.0.1` | zte-http driver: the stick's web interface address |
    | `SMSC` | (empty) | SMS center number; leave empty to use the SIM's |
    | `USSD_BALANCE_CODE` | `*0800#` | USSD code for the balance check |
-   | `REDIS_HOST` / `REDIS_PORT` / `REDIS_PASSWORD` | `127.0.0.1` / `6379` / — | Redis connection |
+   | `USSD_TARIFF_CODE` | `*0805#` | USSD code that makes the carrier SMS back the current tariff plan(s) |
+   | `USSD_NUMBER_CODE` | `*222#` | USSD code that returns the SIM's own phone number |
+   | `REDIS_HOST` / `REDIS_PORT` / `REDIS_PASSWORD` / `REDIS_DB` | `127.0.0.1` / `6379` / — / `0` | Redis connection; `REDIS_DB` isolates the queues on a shared Redis |
    | `DB_PATH` | `./gateway.db` | SQLite database file |
 
    **Multiple modems** — set `MODEMS` to a JSON array; each entry needs a unique `id` and a `driver`, plus the driver's connection settings:
@@ -57,7 +60,7 @@ A small HTTP API that sends and receives SMS through one or more USB GSM modems.
    | `zte-http` | `host` | |
    | `adb` | `serial` (adb device id from `adb devices`) | `adbPath`, `callingPackage`, `smsTxnCode` |
 
-   `smsc` and `ussdBalanceCode` can be set per modem and default to the global `SMSC`/`USSD_BALANCE_CODE`.
+   `smsc`, `ussdBalanceCode`, `ussdTariffCode` and `ussdNumberCode` can be set per modem and default to the global `SMSC`/`USSD_BALANCE_CODE`/`USSD_TARIFF_CODE`/`USSD_NUMBER_CODE`.
 
    ```bash
    MODEMS=[{"id":"zte","driver":"zte-http","host":"192.168.0.1"},{"id":"ufi","driver":"adb","serial":"32f32221","smsTxnCode":6}]
@@ -216,7 +219,7 @@ All-time and last-24h totals, broken down by status:
 
 ### GET `/sms/inbox` — browse stored received messages
 
-Query params: `limit` (default 50, max 500), `offset`, optional `modem` filter. Newest first.
+Query params: `limit` (default 50, max 500), `offset`, optional `modem` and `from` (exact sender number) filters. Newest first.
 
 ```json
 {
@@ -229,21 +232,83 @@ Query params: `limit` (default 50, max 500), `offset`, optional `modem` filter. 
 }
 ```
 
-### GET `/sms/balance` — SIM balance via USSD
+### GET `/sms/balance` — SIM balance
 
-Runs the `USSD_BALANCE_CODE` session on every modem (or one modem with `?modem=<id>`) and returns the raw reply. **Slow**: a USSD round-trip takes 20–30 s per modem (modems are queried in parallel), and it holds the modem lock — queued sends wait until it finishes.
+Returns the newest **persisted** balance per modem (or one modem with `?modem=<id>`) — instant, no modem interaction. `checkedAt` says how fresh it is; queue a refresh when it's too old. With `?live=true` the USSD session runs right now instead (still persisted): **slow** — 20–30 s per modem (queried in parallel) — and it holds the modem lock, so queued sends wait until it finishes.
 
 ```json
 {
   "success": true,
   "data": {
     "balances": {
-      "zte": { "balance": "Balans: 5.20 TMT" },
-      "ufi": { "balance": null, "error": "Modem is not connected" }
+      "zte": { "balance": "Balans: 5.20 TMT", "checkedAt": "2026-07-08T10:00:30.000Z", "requestId": "b2f0a1de-..." },
+      "ufi": { "balance": null, "error": "USSD is not supported on the adb driver" }
     }
   }
 }
 ```
+
+### POST `/sms/balance/refresh` — queue a balance check
+
+Queues the `USSD_BALANCE_CODE` session on every USSD-capable modem (or one with `?modem=<id>`) and returns `202` immediately with one request id per modem:
+
+```json
+{
+  "success": true,
+  "data": { "message": "balance USSD queued", "requests": { "zte": "b2f0a1de-..." } }
+}
+```
+
+Poll `GET /sms/ussd/:id` for the outcome; once `done`, `GET /sms/balance` serves the new value. A silent session is retried once after 15 s — safe for USSD, unlike re-sending an SMS.
+
+### POST `/sms/tariff/refresh` — queue a tariff request
+
+Queues the `USSD_TARIFF_CODE` session (default `*0805#`). The USSD reply is only an acknowledgment — the carrier sends the actual plan details **as SMS** a little later (TMCell: from `0801`, one SMS per active tariff). After the session completes, the gateway sweeps that modem's inbox at +30 s / +90 s / +180 s so the SMS land in the database without a manual `/sms/messages` call. Read them with:
+
+```bash
+curl "http://localhost:3000/sms/inbox?from=0801" -H "x-api-key: YOUR_API_KEY"
+```
+
+### GET `/sms/number` / POST `/sms/number/refresh` — the SIM's own phone number
+
+Same pattern as balance: `GET /sms/number` serves the last persisted `*222#` reply per modem (`?live=true` to run it now), `POST /sms/number/refresh` queues it. Useful when the SIM in a modem is unlabeled.
+
+```json
+{
+  "success": true,
+  "data": {
+    "numbers": {
+      "zte": { "number": "993XXXXXXXX", "checkedAt": "2026-07-08T10:05:00.000Z", "requestId": "..." },
+      "ufi": { "number": null, "error": "USSD is not supported on the adb driver" }
+    }
+  }
+}
+```
+
+### GET `/sms/ussd` — USSD request history
+
+Every USSD session ever run — queued refreshes, `?live=true` checks and the automatic post-failure balance checks — newest first. Query params: `limit` (default 50, max 500), `offset`, optional `kind` (`balance`/`tariff`) and `modem` filters. Balance history over time lives here.
+
+### GET `/sms/ussd/:id` — status of one USSD request
+
+```json
+{
+  "success": true,
+  "data": {
+    "id": "b2f0a1de-...",
+    "modemId": "zte",
+    "kind": "balance",
+    "code": "*0800#",
+    "status": "done",
+    "reply": "Balans: 5.20 TMT",
+    "error": null,
+    "requestedAt": "2026-07-08T10:00:00.000Z",
+    "completedAt": "2026-07-08T10:00:30.000Z"
+  }
+}
+```
+
+`status` is `pending` until the session completes, then `done` or `failed`.
 
 ### Queue dashboard — `/admin/queues`
 
@@ -303,9 +368,9 @@ Notes:
 
 - Run a single instance only (no pm2 `-i`/cluster mode) — the database and the modems are single-process resources; add modems via `MODEMS`, not extra processes.
 - All message history lives in `gateway.db` (SQLite, WAL mode) — back it up by copying the file. A legacy `sent.json` is imported automatically on first start and renamed to `sent.json.imported`.
-- The gateway shuts down cleanly on `SIGINT`/`SIGTERM` (closes the queue and the serial port).
+- The gateway shuts down cleanly on `SIGINT`/`SIGTERM` (closes the queues and the serial port).
 - If a send confirmation times out, the job is **not retried** (the message may already be delivered); the log entry is marked `unconfirmed` for manual follow-up.
-- After a definitive send failure the SIM balance is checked via USSD, at most once per 10 minutes.
+- After a definitive send failure the SIM balance is checked via USSD, at most once per 10 minutes; the result is persisted in the USSD history (`GET /sms/ussd?kind=balance`).
 
 ## Tests
 

@@ -45,15 +45,20 @@ test('driver name is case-insensitive', () => {
 test('global SMSC/USSD apply only when the entry has none', () => {
   const configs = parseModemConfigs({
     MODEMS: JSON.stringify([
-      { id: 'a', driver: 'serial', smsc: '+99361111111' },
+      { id: 'a', driver: 'serial', smsc: '+99361111111', ussdTariffCode: '*111#' },
       { id: 'b', driver: 'serial' },
     ]),
     SMSC: '+99362222222',
     USSD_BALANCE_CODE: '*100#',
+    USSD_TARIFF_CODE: '*0805#',
+    USSD_NUMBER_CODE: '*222#',
   });
   assert.strictEqual(configs[0].smsc, '+99361111111');
   assert.strictEqual(configs[1].smsc, '+99362222222');
   assert.strictEqual(configs[0].ussdBalanceCode, '*100#');
+  assert.strictEqual(configs[0].ussdTariffCode, '*111#');
+  assert.strictEqual(configs[1].ussdTariffCode, '*0805#');
+  assert.strictEqual(configs[1].ussdNumberCode, '*222#');
 });
 
 test('rejects invalid JSON', () => {

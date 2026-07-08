@@ -1,14 +1,9 @@
 const { Queue, Worker, UnrecoverableError } = require('bullmq');
 const { SENDMESSAGEQUEUE } = require('../constants/queue.const');
+const { connection } = require('./redis.config');
+const { enqueueUssd } = require('./ussd.config');
 const pool = require('../utils/pool');
 const { updateLog } = require('../store/log-store');
-
-const connection = {
-  host: process.env.REDIS_HOST || '127.0.0.1',
-  port: parseInt(process.env.REDIS_PORT, 10) || 6379,
-  password: process.env.REDIS_PASSWORD || undefined,
-  maxRetriesPerRequest: null, // required by BullMQ workers
-};
 
 const MODEM_READY_TIMEOUT_MS = 30000;
 const BALANCE_CHECK_MIN_INTERVAL_MS = 10 * 60 * 1000;
@@ -98,14 +93,16 @@ worker.on('completed', (job, result) => {
 const lastBalanceCheckAt = new Map(); // modem id -> timestamp
 async function maybeCheckBalance(modemId) {
   const modem = modemId ? pool.get(modemId) : null;
-  if (!modem) return;
+  if (!modem || !modem.supportsUssd) return;
   // a failing backlog would otherwise queue a 20-30s USSD session on the
   // modem mutex for every failed job
   const last = lastBalanceCheckAt.get(modem.id) || 0;
   if (Date.now() - last < BALANCE_CHECK_MIN_INTERVAL_MS) return;
   lastBalanceCheckAt.set(modem.id, Date.now());
   try {
-    await modem.checkBalance();
+    // through the USSD queue so the result lands in ussd_requests instead
+    // of vanishing into the console log
+    await enqueueUssd(modem, 'balance');
   } catch (e) {
     console.error(`[queue] balance check failed on "${modem.id}":`, e.message);
   }

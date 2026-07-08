@@ -3,7 +3,7 @@
  * a goform HTTP API instead of an AT serial port. Same interface as ./modem.js.
  *
  * createZteModem(config) returns an independent instance; config:
- *   { id, host, ussdBalanceCode }
+ *   { id, host, ussdBalanceCode, ussdTariffCode, ussdNumberCode }
  */
 const http = require('http');
 const { ucs2Hex, ucs2Decode, PHONE_RE, MAX_SEGMENTS, LIMITS } = require('./sms-encoding');
@@ -55,6 +55,8 @@ function createZteModem(config = {}) {
   // the goform API rejects requests without a same-origin Referer
   const HEADERS = { Referer: `${BASE}/index.html` };
   const USSD_BALANCE_CODE = config.ussdBalanceCode || '*0800#';
+  const USSD_TARIFF_CODE = config.ussdTariffCode || '*0805#';
+  const USSD_NUMBER_CODE = config.ussdNumberCode || '*222#';
 
   function log(...args) {
     console.log(`[zte-http ${id}]`, ...args);
@@ -121,6 +123,41 @@ function createZteModem(config = {}) {
   // SMS is a single shared resource on the modem: serialize operations so a
   // queue job and an HTTP request never interleave send/read/delete calls.
   const enqueue = createSerializer();
+
+  function runUssd(code) {
+    return enqueue(async () => {
+      // clear any stuck session first; the modem answers with empty data otherwise
+      try {
+        await setCmd({ goformId: 'USSD_PROCESS', USSD_operator: 'ussd_cancel' });
+        await sleep(1000);
+      } catch (e) { /* no session to cancel */ }
+
+      await setCmd({
+        goformId: 'USSD_PROCESS',
+        USSD_operator: 'ussd_send',
+        USSD_send_number: code,
+      });
+
+      const deadline = Date.now() + USSD_POLL_TIMEOUT_MS;
+      while (Date.now() < deadline) {
+        await sleep(POLL_INTERVAL_MS);
+        // ussd_data is NOT cleared between sessions — it serves the previous
+        // reply until the new one lands. ussd_write_flag says which is which:
+        // 15 = session in progress, 16 = fresh reply ready, 13 = idle after
+        // cancel (flag values observed on the M100-3).
+        const { ussd_write_flag: flag } = await getCmd('ussd_write_flag', '');
+        if (String(flag) !== '16') continue;
+        const info = await getCmd('ussd_data_info', '');
+        if (info.ussd_data) {
+          const text = ucs2Decode(info.ussd_data) || info.ussd_data;
+          log(`ussd ${code} response:`, text);
+          return text;
+        }
+      }
+      log(`ussd ${code} response: (no reply)`);
+      return null;
+    });
+  }
 
   log(`using ZTE HTTP driver at ${BASE}`);
 
@@ -218,34 +255,14 @@ function createZteModem(config = {}) {
         return messages;
       }),
 
+    supportsUssd: true,
+    ussdCodes: { balance: USSD_BALANCE_CODE, tariff: USSD_TARIFF_CODE, number: USSD_NUMBER_CODE },
+
+    /** Run a USSD session; returns the decoded reply text (or null on no reply). */
+    runUssd,
+
     /** Query balance via USSD; returns the decoded reply text (or null on no reply). */
-    checkBalance: () =>
-      enqueue(async () => {
-        // clear any stuck session first; the modem answers with empty data otherwise
-        try {
-          await setCmd({ goformId: 'USSD_PROCESS', USSD_operator: 'ussd_cancel' });
-          await sleep(1000);
-        } catch (e) { /* no session to cancel */ }
-
-        await setCmd({
-          goformId: 'USSD_PROCESS',
-          USSD_operator: 'ussd_send',
-          USSD_send_number: USSD_BALANCE_CODE,
-        });
-
-        const deadline = Date.now() + USSD_POLL_TIMEOUT_MS;
-        while (Date.now() < deadline) {
-          await sleep(POLL_INTERVAL_MS);
-          const info = await getCmd('ussd_data_info', '');
-          if (info.ussd_data) {
-            const text = ucs2Decode(info.ussd_data) || info.ussd_data;
-            log('balance response:', text);
-            return text;
-          }
-        }
-        log('balance response: (no reply)');
-        return null;
-      }),
+    checkBalance: () => runUssd(USSD_BALANCE_CODE),
 
     close: async () => {},
   };
