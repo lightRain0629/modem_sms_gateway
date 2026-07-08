@@ -44,15 +44,39 @@ const checkApiKey = (req, res, next) => {
 
 app.use('/sms', checkApiKey, router);
 
-// Bull Board dashboard — basic auth so it works from a browser.
-// Login: any username, password = API_KEY.
+// Bull Board dashboard — basic auth so it works from a browser, with its
+// own credentials so the machine-to-machine API_KEY never gets typed into
+// a browser. Falls back to the legacy login (any username, API_KEY as
+// password) when the dashboard credentials aren't configured.
+const { DASHBOARD_USER, DASHBOARD_PASSWORD } = process.env;
+if (!!DASHBOARD_USER !== !!DASHBOARD_PASSWORD) {
+  console.error('DASHBOARD_USER and DASHBOARD_PASSWORD must be set together.');
+  process.exit(1);
+}
+if (!DASHBOARD_PASSWORD) {
+  console.warn(
+    '[dashboard] DASHBOARD_USER/DASHBOARD_PASSWORD not set — ' +
+      '/admin/queues accepts the API_KEY as password (any username)'
+  );
+}
+
 const checkBasicAuth = (req, res, next) => {
   const auth = req.get('authorization') || '';
   if (auth.startsWith('Basic ')) {
     const decoded = Buffer.from(auth.slice(6), 'base64').toString('utf8');
     const sep = decoded.indexOf(':');
+    const username = sep >= 0 ? decoded.slice(0, sep) : decoded;
     const password = sep >= 0 ? decoded.slice(sep + 1) : '';
-    if (password && timingSafeEqual(password, process.env.API_KEY)) return next();
+    let ok;
+    if (DASHBOARD_PASSWORD) {
+      // no && short-circuit: a username miss must cost the same as a hit
+      const userOk = timingSafeEqual(username, DASHBOARD_USER);
+      const passOk = timingSafeEqual(password, DASHBOARD_PASSWORD);
+      ok = userOk & passOk;
+    } else {
+      ok = password && timingSafeEqual(password, process.env.API_KEY);
+    }
+    if (ok) return next();
   }
   res.set('WWW-Authenticate', 'Basic realm="Queue Dashboard"');
   return res.status(401).send('Authentication required');
