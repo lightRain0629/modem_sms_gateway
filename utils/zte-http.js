@@ -3,11 +3,19 @@
  * a goform HTTP API instead of an AT serial port. Same interface as ./modem.js.
  *
  * createZteModem(config) returns an independent instance; config:
- *   { id, host, ussdBalanceCode, ussdTariffCode, ussdNumberCode }
+ *   { id, host, api, ussdBalanceCode, ussdTariffCode, ussdNumberCode }
  */
 const http = require('http');
 const { ucs2Hex, ucs2Decode, PHONE_RE, MAX_SEGMENTS, LIMITS } = require('./sms-encoding');
 const createSerializer = require('./serialize');
+
+// The same zte_web protocol ships under two URL layouts: the classic goform
+// endpoints (M100-3 / MF823...) and the reqproc endpoints found on rebadged
+// ZTE-chipset sticks (e.g. OLAX U90). Selected per modem via config.api.
+const API_PATHS = {
+  goform: { get: '/goform/goform_get_cmd_process', set: '/goform/goform_set_cmd_process' },
+  reqproc: { get: '/reqproc/proc_get', set: '/reqproc/proc_post' },
+};
 
 const HTTP_TIMEOUT_MS = 5000;
 const SEND_POLL_TIMEOUT_MS = 60000;
@@ -52,8 +60,25 @@ function createZteModem(config = {}) {
   const id = config.id || 'zte';
   const HOST = config.host || '192.168.0.1';
   const BASE = `http://${HOST}`;
+  const API = String(config.api || 'goform').toLowerCase();
+  const PATHS = API_PATHS[API];
+  if (!PATHS) {
+    throw new Error(
+      `Modem "${id}": unknown zte-http api "${config.api}" — use ${Object.keys(API_PATHS)
+        .map((k) => `"${k}"`)
+        .join(' or ')}`
+    );
+  }
   // the goform API rejects requests without a same-origin Referer
   const HEADERS = { Referer: `${BASE}/index.html` };
+  // reqproc builds (OLAX U90...) gate every state-changing call behind a login
+  // and expect the XHR marker the web UI sends; goform (M100-3) needs neither.
+  // The session is tracked server-side by client IP — no cookie to carry.
+  // A blank password is treated as "unset" so a goform modem is never dragged
+  // into the login flow by an empty config field.
+  const PASSWORD = config.password ? String(config.password) : API === 'reqproc' ? 'admin' : null;
+  const needsLogin = PASSWORD !== null;
+  if (needsLogin) HEADERS['X-Requested-With'] = 'XMLHttpRequest';
   const USSD_BALANCE_CODE = config.ussdBalanceCode || '*0800#';
   const USSD_TARIFF_CODE = config.ussdTariffCode || '*0805#';
   const USSD_NUMBER_CODE = config.ussdNumberCode || '*222#';
@@ -107,13 +132,52 @@ function createZteModem(config = {}) {
 
   function getCmd(cmds, extra = '') {
     const multi = cmds.includes(',') ? 'multi_data=1&' : '';
-    const url = `${BASE}/goform/goform_get_cmd_process?isTest=false&${multi}cmd=${encodeURIComponent(cmds)}${extra}`;
+    const url = `${BASE}${PATHS.get}?isTest=false&${multi}cmd=${encodeURIComponent(cmds)}${extra}`;
     return request('GET', url);
   }
 
+  let loggedIn = false;
+
+  // The web UI base64-encodes the password (PASSWORD_ENCODE) before LOGIN.
+  // Success is result "0" (logged in) or "4" (already logged in).
+  async function login() {
+    const body = new URLSearchParams({
+      goformId: 'LOGIN',
+      password: Buffer.from(PASSWORD).toString('base64'),
+    }).toString();
+    const json = await request('POST', `${BASE}${PATHS.set}`, body);
+    // String() because some firmwares return the result as a JSON number, the
+    // same defensive coercion this file uses for tags and USSD flags
+    const result = String(json.result);
+    if (result !== '0' && result !== '4') {
+      throw new Error(`Login failed on "${id}": ${JSON.stringify(json)}`);
+    }
+    loggedIn = true;
+  }
+
+  function postCmd(params) {
+    return request('POST', `${BASE}${PATHS.set}`, new URLSearchParams(params).toString());
+  }
+
+  // On authed builds the SMS-list read also needs a live session, but an
+  // expired one returns empty data rather than an error — indistinguishable
+  // from a truly empty inbox. Refresh the login before such reads instead of
+  // trusting the loggedIn flag (which only tracks our own last login, not the
+  // modem's IP-session timeout).
+  async function ensureAuthedForRead() {
+    if (needsLogin) await login();
+  }
+
   async function setCmd(params) {
-    const body = new URLSearchParams(params).toString();
-    const json = await request('POST', `${BASE}/goform/goform_set_cmd_process`, body);
+    if (needsLogin && !loggedIn) await login();
+    let json = await postCmd(params);
+    // the IP-bound session expires after a while; a rejected write on an
+    // authed build most likely means it lapsed — re-login once and retry
+    if (json.result !== 'success' && needsLogin) {
+      loggedIn = false;
+      await login();
+      json = await postCmd(params);
+    }
     if (json.result !== 'success') {
       throw new Error(`Modem rejected ${params.goformId}: ${JSON.stringify(json)}`);
     }
@@ -159,7 +223,7 @@ function createZteModem(config = {}) {
     });
   }
 
-  log(`using ZTE HTTP driver at ${BASE}`);
+  log(`using ZTE HTTP driver at ${BASE} (${API} api)`);
 
   return {
     id,
@@ -171,8 +235,10 @@ function createZteModem(config = {}) {
     isConnected: () => true,
 
     ping: async () => {
-      const info = await getCmd('modem_model,sim_status', '');
-      return Boolean(info && info.modem_model);
+      // some rebadged builds (OLAX U90) return "" for modem_model but always
+      // report modem_main_state
+      const info = await getCmd('modem_model,modem_main_state', '');
+      return Boolean(info && (info.modem_model || info.modem_main_state));
     },
 
     sendSMS: (to, message) =>
@@ -221,6 +287,7 @@ function createZteModem(config = {}) {
      */
     getMessages: (persist) =>
       enqueue(async () => {
+        await ensureAuthedForRead();
         const data = await getCmd(
           'sms_data_total',
           '&page=0&data_per_page=500&mem_store=1&tags=10&order_by=order+by+id+desc'
@@ -268,4 +335,4 @@ function createZteModem(config = {}) {
   };
 }
 
-module.exports = { createZteModem };
+module.exports = { createZteModem, API_PATHS };

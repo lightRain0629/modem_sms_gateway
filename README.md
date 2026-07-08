@@ -7,7 +7,7 @@ A small HTTP API that sends and receives SMS through one or more USB GSM modems.
 - **Bull Board** — web dashboard for the queue at `/admin/queues`
 - **Multiple modems** in one process (`MODEMS` env): sends are spread round-robin across connected modems, or pinned to one with the `modem` field on `/sms/send`. Three drivers:
   - **serial** — classic AT-command modems on `/dev/ttyUSB*` (serialport, auto-reconnect)
-  - **zte-http** — ZTE HiLink/RNDIS sticks (MF823 / M100-3 ...) that expose a web API at `192.168.0.1` instead of a serial port
+  - **zte-http** — ZTE HiLink/RNDIS sticks (MF823 / M100-3 ...) that expose a web API at `192.168.0.1` instead of a serial port. Rebadged ZTE-chipset sticks (e.g. OLAX U90) speak the same protocol at different URLs — set `"api": "reqproc"` for those; those builds also require a web-UI login before any send (the driver logs in automatically with `"password"`, default `admin`)
   - **adb** — Android-based sticks reached over ADB (e.g. UFI003S: a Qualcomm MSM8916 running Android 4.4.4 with no AT port and no SMS in its web API); sends through Android's own SMS service. Inbox reading and USSD balance are unsupported on this driver (the adb shell lacks READ_SMS and there's no headless USSD)
 - All modem access is serialized per modem — the queue worker and API requests never talk to the same modem at the same time, while different modems work in parallel
 - **SQLite storage** (`gateway.db`, via better-sqlite3): every outbound SMS with its delivery status and the modem that sent it, and every inbound SMS (persisted *before* it is deleted from the modem)
@@ -57,7 +57,7 @@ A small HTTP API that sends and receives SMS through one or more USB GSM modems.
    | Driver | Required | Optional |
    |---|---|---|
    | `serial` | `port` | `baudRate` |
-   | `zte-http` | `host` | |
+   | `zte-http` | `host` | `api` — URL layout: `goform` (default; MF823/M100-3) or `reqproc` (rebadged ZTE-chipset sticks, e.g. OLAX U90); `password` — web-UI password for `reqproc` builds that gate writes behind a login (defaults to `admin`) |
    | `adb` | `serial` (adb device id from `adb devices`) | `adbPath`, `callingPackage`, `smsTxnCode`, `smsBridge` (`false` to disable the inbox companion app), `smsBridgePackage` |
 
    `smsc`, `ussdBalanceCode`, `ussdTariffCode` and `ussdNumberCode` can be set per modem and default to the global `SMSC`/`USSD_BALANCE_CODE`/`USSD_TARIFF_CODE`/`USSD_NUMBER_CODE`.
