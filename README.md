@@ -48,6 +48,7 @@ A small HTTP API that sends and receives SMS through one or more USB GSM modems.
    | `SMSC` | (empty) | SMS center number; leave empty to use the SIM's |
    | `USSD_BALANCE_CODE` | `*0800#` | USSD code for the balance check |
    | `USSD_TARIFF_CODE` | `*0805#` | USSD code that makes the carrier SMS back the current tariff plan(s) |
+   | `USSD_NUMBER_CODE` | `*222#` | USSD code that returns the SIM's own phone number |
    | `REDIS_HOST` / `REDIS_PORT` / `REDIS_PASSWORD` / `REDIS_DB` | `127.0.0.1` / `6379` / — / `0` | Redis connection; `REDIS_DB` isolates the queues on a shared Redis |
    | `DB_PATH` | `./gateway.db` | SQLite database file |
 
@@ -59,7 +60,7 @@ A small HTTP API that sends and receives SMS through one or more USB GSM modems.
    | `zte-http` | `host` | |
    | `adb` | `serial` (adb device id from `adb devices`) | `adbPath`, `callingPackage`, `smsTxnCode` |
 
-   `smsc`, `ussdBalanceCode` and `ussdTariffCode` can be set per modem and default to the global `SMSC`/`USSD_BALANCE_CODE`/`USSD_TARIFF_CODE`.
+   `smsc`, `ussdBalanceCode`, `ussdTariffCode` and `ussdNumberCode` can be set per modem and default to the global `SMSC`/`USSD_BALANCE_CODE`/`USSD_TARIFF_CODE`/`USSD_NUMBER_CODE`.
 
    ```bash
    MODEMS=[{"id":"zte","driver":"zte-http","host":"192.168.0.1"},{"id":"ufi","driver":"adb","serial":"32f32221","smsTxnCode":6}]
@@ -266,6 +267,22 @@ Queues the `USSD_TARIFF_CODE` session (default `*0805#`). The USSD reply is only
 
 ```bash
 curl "http://localhost:3000/sms/inbox?from=0801" -H "x-api-key: YOUR_API_KEY"
+```
+
+### GET `/sms/number` / POST `/sms/number/refresh` — the SIM's own phone number
+
+Same pattern as balance: `GET /sms/number` serves the last persisted `*222#` reply per modem (`?live=true` to run it now), `POST /sms/number/refresh` queues it. Useful when the SIM in a modem is unlabeled.
+
+```json
+{
+  "success": true,
+  "data": {
+    "numbers": {
+      "zte": { "number": "993XXXXXXXX", "checkedAt": "2026-07-08T10:05:00.000Z", "requestId": "..." },
+      "ufi": { "number": null, "error": "USSD is not supported on the adb driver" }
+    }
+  }
+}
 ```
 
 ### GET `/sms/ussd` — USSD request history

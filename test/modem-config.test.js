@@ -51,12 +51,14 @@ test('global SMSC/USSD apply only when the entry has none', () => {
     SMSC: '+99362222222',
     USSD_BALANCE_CODE: '*100#',
     USSD_TARIFF_CODE: '*0805#',
+    USSD_NUMBER_CODE: '*222#',
   });
   assert.strictEqual(configs[0].smsc, '+99361111111');
   assert.strictEqual(configs[1].smsc, '+99362222222');
   assert.strictEqual(configs[0].ussdBalanceCode, '*100#');
   assert.strictEqual(configs[0].ussdTariffCode, '*111#');
   assert.strictEqual(configs[1].ussdTariffCode, '*0805#');
+  assert.strictEqual(configs[1].ussdNumberCode, '*222#');
 });
 
 test('rejects invalid JSON', () => {

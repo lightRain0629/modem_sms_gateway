@@ -365,6 +365,78 @@
         }
       }
     },
+    "/sms/number": {
+      "get": {
+        "tags": ["Monitoring"],
+        "summary": "The SIM's own phone number (last known, or live via USSD)",
+        "description": "Same pattern as `/sms/balance`: returns the newest persisted `USSD_NUMBER_CODE` (default `*222#`) reply per modem, or runs the session now with `?live=true`. Useful when the SIM in a modem is unlabeled. Unsupported on `adb` modems.",
+        "operationId": "getNumber",
+        "parameters": [
+          { "$ref": "#/components/parameters/ModemFilter" },
+          {
+            "name": "live",
+            "in": "query",
+            "description": "`true`/`1`: run the USSD session now instead of reading the stored value.",
+            "schema": { "type": "boolean", "default": false }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Per-modem numbers. A modem with no answer carries `number: null` and an `error`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": { "type": "boolean", "const": true },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "numbers": {
+                          "type": "object",
+                          "description": "Keyed by modem id.",
+                          "additionalProperties": { "$ref": "#/components/schemas/NumberResult" }
+                        }
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "success": true,
+                  "data": {
+                    "numbers": {
+                      "zte": {
+                        "number": "993XXXXXXXX",
+                        "checkedAt": "2026-07-08T10:05:00.000Z",
+                        "requestId": "c3d1b2ef-0a4b-4d2c-8e77-1f9a6b3c5d21"
+                      },
+                      "ufi": { "number": null, "error": "USSD is not supported on the adb driver" }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/UnknownModem" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/sms/number/refresh": {
+      "post": {
+        "tags": ["Monitoring"],
+        "summary": "Queue an own-number USSD check",
+        "description": "Queues the `USSD_NUMBER_CODE` session on every USSD-capable modem (or one modem with `?modem=`). Poll `GET /sms/ussd/{id}` for the outcome; once `done`, `GET /sms/number` serves the value.",
+        "operationId": "refreshNumber",
+        "parameters": [{ "$ref": "#/components/parameters/ModemFilter" }],
+        "responses": {
+          "202": { "$ref": "#/components/responses/UssdQueued" },
+          "400": { "$ref": "#/components/responses/UnknownModem" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "500": { "$ref": "#/components/responses/ServerError" }
+        }
+      }
+    },
     "/sms/ussd": {
       "get": {
         "tags": ["Monitoring"],
@@ -720,8 +792,25 @@
       },
       "UssdKind": {
         "type": "string",
-        "enum": ["balance", "tariff"],
-        "description": "`balance` — the reply itself carries the balance; `tariff` — the reply only acknowledges, the plan details arrive as SMS."
+        "enum": ["balance", "tariff", "number"],
+        "description": "`balance` — the reply itself carries the balance; `tariff` — the reply only acknowledges, the plan details arrive as SMS; `number` — the reply carries the SIM's own phone number."
+      },
+      "NumberResult": {
+        "type": "object",
+        "properties": {
+          "number": { "type": ["string", "null"], "description": "Raw USSD reply, `null` when none is available." },
+          "checkedAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the number was read from the SIM."
+          },
+          "requestId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The underlying USSD request (see `GET /sms/ussd/{id}`)."
+          },
+          "error": { "type": "string", "description": "Present when no number is available." }
+        }
       },
       "UssdRequest": {
         "type": "object",

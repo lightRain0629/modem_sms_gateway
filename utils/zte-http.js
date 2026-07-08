@@ -56,6 +56,7 @@ function createZteModem(config = {}) {
   const HEADERS = { Referer: `${BASE}/index.html` };
   const USSD_BALANCE_CODE = config.ussdBalanceCode || '*0800#';
   const USSD_TARIFF_CODE = config.ussdTariffCode || '*0805#';
+  const USSD_NUMBER_CODE = config.ussdNumberCode || '*222#';
 
   function log(...args) {
     console.log(`[zte-http ${id}]`, ...args);
@@ -255,7 +256,7 @@ function createZteModem(config = {}) {
       }),
 
     supportsUssd: true,
-    ussdCodes: { balance: USSD_BALANCE_CODE, tariff: USSD_TARIFF_CODE },
+    ussdCodes: { balance: USSD_BALANCE_CODE, tariff: USSD_TARIFF_CODE, number: USSD_NUMBER_CODE },
 
     /** Run a USSD session; returns the decoded reply text (or null on no reply). */
     runUssd,

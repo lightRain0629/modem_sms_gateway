@@ -41,6 +41,7 @@ function createSerialModem(config = {}) {
   const SMSC = (config.smsc || '').trim();
   const USSD_BALANCE_CODE = config.ussdBalanceCode || '*0800#';
   const USSD_TARIFF_CODE = config.ussdTariffCode || '*0805#';
+  const USSD_NUMBER_CODE = config.ussdNumberCode || '*222#';
 
   // -------------------------------------------------------------------------
   // Connection state
@@ -396,7 +397,7 @@ function createSerialModem(config = {}) {
       }),
 
     supportsUssd: true,
-    ussdCodes: { balance: USSD_BALANCE_CODE, tariff: USSD_TARIFF_CODE },
+    ussdCodes: { balance: USSD_BALANCE_CODE, tariff: USSD_TARIFF_CODE, number: USSD_NUMBER_CODE },
 
     /** Run a USSD session; returns the raw +CUSD line (or null on no reply). */
     runUssd,

@@ -9,8 +9,9 @@
  * (MODEM_DRIVER, USB_PORT, BAUD_RATE, ZTE_HOST) are used, producing one
  * modem with id "default" — existing .env files keep working unchanged.
  *
- * SMSC, USSD_BALANCE_CODE and USSD_TARIFF_CODE act as global defaults for
- * entries that don't set their own smsc / ussdBalanceCode / ussdTariffCode.
+ * SMSC, USSD_BALANCE_CODE, USSD_TARIFF_CODE and USSD_NUMBER_CODE act as
+ * global defaults for entries that don't set their own smsc /
+ * ussdBalanceCode / ussdTariffCode / ussdNumberCode.
  */
 const DRIVERS = ['serial', 'zte-http', 'adb'];
 
@@ -69,6 +70,8 @@ function parseModemConfigs(env = process.env) {
         entry.ussdBalanceCode !== undefined ? entry.ussdBalanceCode : env.USSD_BALANCE_CODE,
       ussdTariffCode:
         entry.ussdTariffCode !== undefined ? entry.ussdTariffCode : env.USSD_TARIFF_CODE,
+      ussdNumberCode:
+        entry.ussdNumberCode !== undefined ? entry.ussdNumberCode : env.USSD_NUMBER_CODE,
     };
   });
 }

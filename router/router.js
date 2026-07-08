@@ -192,7 +192,7 @@ function unknownModem(res, modemId) {
 
 // Run one USSD session right now (holding the modem mutex), persisting the
 // outcome to ussd_requests like the queued path does.
-async function runUssdNow(modem, kind) {
+async function runUssdNow(modem, kind, valueKey) {
   const request = {
     id: crypto.randomUUID(),
     modemId: modem.id,
@@ -206,45 +206,56 @@ async function runUssdNow(modem, kind) {
     const reply = await modem.runUssd(request.code);
     if (!reply) {
       await completeRequest(request.id, { status: 'failed', error: 'No USSD reply' });
-      return { balance: null, error: 'No USSD reply', requestId: request.id };
+      return { [valueKey]: null, error: 'No USSD reply', requestId: request.id };
     }
     const done = await completeRequest(request.id, { status: 'done', reply });
-    return { balance: reply, checkedAt: done.completedAt, requestId: request.id };
+    return { [valueKey]: reply, checkedAt: done.completedAt, requestId: request.id };
   } catch (err) {
     await completeRequest(request.id, { status: 'failed', error: err.message }).catch(() => {});
-    return { balance: null, error: err.message, requestId: request.id };
+    return { [valueKey]: null, error: err.message, requestId: request.id };
   }
 }
 
-// Last known balance per modem, from the persisted USSD history. ?live=true
-// runs the USSD session now instead — slow (20-30s per modem, in parallel)
-// and it holds the modem mutex, so queued sends wait behind it.
-router.get('/balance', async (req, res) => {
-  const modemId = filter(req.query.modem);
-  if (modemId && !pool.get(modemId)) return unknownModem(res, modemId);
-  const targets = modemId ? [pool.get(modemId)] : pool.all();
-  const live = req.query.live === 'true' || req.query.live === '1';
+// A "stored USSD value" endpoint (balance, own number): answers from the
+// persisted USSD history per modem. ?live=true runs the session now instead —
+// slow (20-30s per modem, in parallel) and it holds the modem mutex, so
+// queued sends wait behind it.
+function storedUssdView(kind, valueKey, wrapperKey) {
+  return async (req, res) => {
+    const modemId = filter(req.query.modem);
+    if (modemId && !pool.get(modemId)) return unknownModem(res, modemId);
+    const targets = modemId ? [pool.get(modemId)] : pool.all();
+    const live = req.query.live === 'true' || req.query.live === '1';
 
-  const entries = await Promise.all(
-    targets.map(async (m) => {
-      if (!m.supportsUssd) {
-        return [m.id, { balance: null, error: `USSD is not supported on the ${m.driver} driver` }];
-      }
-      if (live) return [m.id, await runUssdNow(m, 'balance')];
-      const last = await latestDone(m.id, 'balance');
-      return [
-        m.id,
-        last
-          ? { balance: last.reply, checkedAt: last.completedAt, requestId: last.id }
-          : {
-              balance: null,
-              error: 'No stored balance yet — POST /sms/balance/refresh or use ?live=true',
-            },
-      ];
-    })
-  );
-  return res.json({ success: true, data: { balances: Object.fromEntries(entries) } });
-});
+    const entries = await Promise.all(
+      targets.map(async (m) => {
+        if (!m.supportsUssd) {
+          return [
+            m.id,
+            { [valueKey]: null, error: `USSD is not supported on the ${m.driver} driver` },
+          ];
+        }
+        if (live) return [m.id, await runUssdNow(m, kind, valueKey)];
+        const last = await latestDone(m.id, kind);
+        return [
+          m.id,
+          last
+            ? { [valueKey]: last.reply, checkedAt: last.completedAt, requestId: last.id }
+            : {
+                [valueKey]: null,
+                error: `No stored ${kind} yet — POST /sms/${kind}/refresh or use ?live=true`,
+              },
+        ];
+      })
+    );
+    return res.json({ success: true, data: { [wrapperKey]: Object.fromEntries(entries) } });
+  };
+}
+
+router.get('/balance', storedUssdView('balance', 'balance', 'balances'));
+// The SIM's own phone number via USSD (*222# on TMCell) — useful when the
+// card in a modem is unlabeled.
+router.get('/number', storedUssdView('number', 'number', 'numbers'));
 
 // Queue a USSD session per modem and return immediately; poll
 // GET /sms/ussd/:id for the outcome.
@@ -283,6 +294,7 @@ router.post('/balance/refresh', queueUssdRefresh('balance'));
 // minutes later; the worker sweeps the inbox afterwards, so check
 // GET /sms/inbox?from=0801 for the actual plan details.
 router.post('/tariff/refresh', queueUssdRefresh('tariff'));
+router.post('/number/refresh', queueUssdRefresh('number'));
 
 router.get('/ussd', async (req, res) => {
   try {
