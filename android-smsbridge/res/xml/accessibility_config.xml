@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The USSD reply on KitKat is shown only in a system AlertDialog; an
+     AccessibilityService is the one way a non-system app can read that text.
+     We listen for window-state changes and notification text. -->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged|typeNotificationStateChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagDefault"
+    android:canRetrieveWindowContent="true"
+    android:notificationTimeout="100" />

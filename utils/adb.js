@@ -35,12 +35,20 @@ function shQuote(s) {
   return `'${String(s).replace(/'/g, `'\\''`)}'`;
 }
 
+// Optional companion app (android-smsbridge) that grants the inbox capability
+// the bare adb shell lacks: it holds READ_SMS/RECEIVE_SMS and appends incoming
+// SMS to a file the shell can read. Disabled with `smsBridge: false`.
+const DEFAULT_BRIDGE_PKG = 'com.gateway.smsbridge';
+const BRIDGE_DIR = '/sdcard/smsbridge';
+
 function createAdbModem(config = {}) {
   const id = config.id || 'adb';
   const serial = config.serial || null;
   const adbPath = config.adbPath || process.env.ADB_PATH || 'adb';
   const callingPkg = config.callingPackage || DEFAULT_CALLING_PKG;
   const smsTxn = parseInt(config.smsTxnCode, 10) || DEFAULT_SMS_TXN;
+  const bridgePkg =
+    config.smsBridge === false ? null : config.smsBridgePackage || DEFAULT_BRIDGE_PKG;
 
   function log(...args) {
     console.log(`[adb ${id}]`, ...args);
@@ -131,14 +139,57 @@ function createAdbModem(config = {}) {
         return { reference: `adb:sent${parts.length > 1 ? `:${parts.length}parts` : ''}` };
       }),
 
-    // Inbox reading needs READ_SMS (the adb shell lacks it) — no-op so the
-    // multi-modem /sms/messages sweep still works for the other modems.
-    getMessages: async () => [],
+    // Inbox: the bare adb shell lacks READ_SMS, but the optional smsbridge
+    // companion app captures incoming SMS (SMS_RECEIVED reaches any RECEIVE_SMS
+    // holder on KitKat) into a file the shell can drain. Without the app this
+    // is a no-op ([]), so the multi-modem sweep still serves the other modems.
+    getMessages: (persist) =>
+      enqueue(async () => {
+        if (!bridgePkg || !connected) return [];
 
-    // No headless USSD over adb.
+        // Fold the live-capture log into a "reading" file (new SMS then start a
+        // fresh log) and emit it in one shot. The reading file is deleted only
+        // after persist succeeds, so a failed DB write keeps the messages.
+        const drain =
+          `cd ${BRIDGE_DIR} 2>/dev/null || exit 0; ` +
+          `[ -f incoming.jsonl ] && cat incoming.jsonl >> incoming.reading.jsonl && rm -f incoming.jsonl; ` +
+          `cat incoming.reading.jsonl 2>/dev/null`;
+        const out = await adb(['shell', drain]).catch((e) => {
+          log('inbox drain failed:', e.message);
+          return '';
+        });
+
+        const messages = [];
+        for (const line of out.split('\n')) {
+          const s = line.trim();
+          if (!s) continue;
+          try {
+            const m = JSON.parse(s);
+            messages.push({
+              status: 'REC UNREAD',
+              from: m.from || '',
+              date: m.date ? new Date(m.date).toISOString() : '',
+              text: m.text || '',
+            });
+          } catch (_) {
+            /* skip a partially-written line */
+          }
+        }
+
+        if (messages.length > 0 && persist) {
+          await persist(messages); // throws → reading file kept for next drain
+        }
+        await adb(['shell', `rm -f ${BRIDGE_DIR}/incoming.reading.jsonl`]).catch(() => {});
+        return messages;
+      }),
+
+    // USSD: the smsbridge app can dial and screen-scrape the reply, but this
+    // device registers LTE-only with "CSS not supported", so the network
+    // releases every USSD session (UNSOL_ON_USSD mode 2) — it fails at the
+    // radio, not in software. Left unsupported so the pool never waits on it.
     supportsUssd: false,
     runUssd: async () => {
-      throw new Error('USSD is not supported on the adb driver');
+      throw new Error('USSD is not supported on the adb driver (this modem has no CS USSD)');
     },
     checkBalance: async () => null,
 

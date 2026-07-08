@@ -28,7 +28,7 @@ function validateSend(req, res, next) {
   if (!PHONE_RE.test(to)) {
     return res.status(400).json({
       success: false,
-      message: 'to must be a phone number in international format, e.g. +99361234567',
+      message: 'to must be a phone number in international format, e.g. +99360123456',
     });
   }
   if (typeof message !== 'string' || message.trim().length === 0) {

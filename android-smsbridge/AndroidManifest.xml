@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  SMS Bridge — a minimal helper app for the adb (UFI003S) modem driver.
+
+  The adb shell holds only SEND_SMS, so the gateway can send but cannot read
+  the inbox or run USSD. This app declares READ_SMS/RECEIVE_SMS/CALL_PHONE and
+  exposes two shell-triggerable broadcast actions that write their result to a
+  file on external storage the adb shell can read:
+
+    DUMP_INBOX -> /sdcard/smsbridge/inbox.json  (all inbox SMS as JSON)
+    RUN_USSD   -> /sdcard/smsbridge/ussd.json   (USSD reply, captured by the
+                                                 AccessibilityService)
+
+  See README.md for the exact am broadcast invocations.
+
+  targetSdkVersion 19: pre-M install-time permission model, so the permissions
+  above are granted at install with no runtime prompt.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.gateway.smsbridge"
+    android:versionCode="1"
+    android:versionName="1.0">
+
+    <uses-sdk android:minSdkVersion="19" android:targetSdkVersion="19" />
+
+    <uses-permission android:name="android.permission.READ_SMS" />
+    <uses-permission android:name="android.permission.RECEIVE_SMS" />
+    <uses-permission android:name="android.permission.WRITE_SMS" />
+    <uses-permission android:name="android.permission.CALL_PHONE" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+
+    <application android:label="SMS Bridge" android:allowBackup="false">
+        <receiver android:name=".BridgeReceiver" android:exported="true">
+            <intent-filter>
+                <action android:name="com.gateway.smsbridge.DUMP_INBOX" />
+                <action android:name="com.gateway.smsbridge.RUN_USSD" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Incoming SMS capture (works for any RECEIVE_SMS holder on KitKat). -->
+        <receiver android:name=".SmsReceiver" android:exported="true">
+            <intent-filter android:priority="2147483647">
+                <action android:name="android.provider.Telephony.SMS_RECEIVED" />
+            </intent-filter>
+        </receiver>
+
+        <service
+            android:name=".UssdAccessibilityService"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_config" />
+        </service>
+    </application>
+</manifest>

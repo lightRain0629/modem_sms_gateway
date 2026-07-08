@@ -58,7 +58,7 @@ A small HTTP API that sends and receives SMS through one or more USB GSM modems.
    |---|---|---|
    | `serial` | `port` | `baudRate` |
    | `zte-http` | `host` | |
-   | `adb` | `serial` (adb device id from `adb devices`) | `adbPath`, `callingPackage`, `smsTxnCode` |
+   | `adb` | `serial` (adb device id from `adb devices`) | `adbPath`, `callingPackage`, `smsTxnCode`, `smsBridge` (`false` to disable the inbox companion app), `smsBridgePackage` |
 
    `smsc`, `ussdBalanceCode`, `ussdTariffCode` and `ussdNumberCode` can be set per modem and default to the global `SMSC`/`USSD_BALANCE_CODE`/`USSD_TARIFF_CODE`/`USSD_NUMBER_CODE`.
 
@@ -111,7 +111,7 @@ Request body:
 
 ```json
 {
-  "to": "+99361234567",
+  "to": "+99360123456",
   "message": "Hello, this is a test SMS.",
   "projectName": "E-Center"
 }
@@ -152,7 +152,7 @@ Validation errors return `400` with `{ "success": false, "message": "..." }`.
   "data": {
     "id": "7edf5906-...",
     "timestamp": "2026-07-06T10:00:00.000Z",
-    "to": "+99361234567",
+    "to": "+99360123456",
     "message": "Hello",
     "projectName": "E-Center",
     "ip": "::1",
@@ -176,7 +176,7 @@ Reads all SMS stored on every modem's SIM/device (or one modem with `?modem=<id>
   "success": true,
   "data": {
     "messages": [
-      { "status": "REC UNREAD", "from": "+99361234567", "date": "26/07/06,12:30:00+20", "text": "Hi", "modemId": "zte" }
+      { "status": "REC UNREAD", "from": "+99360123456", "date": "26/07/06,12:30:00+20", "text": "Hi", "modemId": "zte" }
     ]
   }
 }
@@ -193,7 +193,7 @@ Query params: `limit` (default 50, max 500), `offset`, and optional equality fil
   "success": true,
   "data": {
     "messages": [
-      { "id": "7edf5906-...", "timestamp": "2026-07-06T10:00:00.000Z", "to": "+99361234567", "message": "Hello", "projectName": "E-Center", "ip": "::1", "status": "sent", "sentAt": "2026-07-06T10:00:04.000Z", "reference": "+CMGS: 12", "error": null }
+      { "id": "7edf5906-...", "timestamp": "2026-07-06T10:00:00.000Z", "to": "+99360123456", "message": "Hello", "projectName": "E-Center", "ip": "::1", "status": "sent", "sentAt": "2026-07-06T10:00:04.000Z", "reference": "+CMGS: 12", "error": null }
     ],
     "total": 128,
     "limit": 50,
@@ -226,7 +226,7 @@ Query params: `limit` (default 50, max 500), `offset`, optional `modem` and `fro
   "success": true,
   "data": {
     "messages": [
-      { "id": 3, "from": "+99361234567", "date": "26/07/06/12/30/00/+20", "text": "Hi", "receivedAt": "2026-07-06T12:30:05.000Z", "modemId": "zte" }
+      { "id": 3, "from": "+99360123456", "date": "26/07/06/12/30/00/+20", "text": "Hi", "receivedAt": "2026-07-06T12:30:05.000Z", "modemId": "zte" }
     ]
   }
 }
@@ -343,7 +343,7 @@ Probes every modem (an `AT` command on serial, a status query on zte-http). Alwa
 curl -X POST http://localhost:3000/sms/send \
   -H "Content-Type: application/json" \
   -H "x-api-key: YOUR_API_KEY" \
-  -d '{"to": "+99361234567", "message": "Hello from the gateway", "projectName": "E-Center"}'
+  -d '{"to": "+99360123456", "message": "Hello from the gateway", "projectName": "E-Center"}'
 
 # then check delivery:
 curl http://localhost:3000/sms/status/<logId> -H "x-api-key: YOUR_API_KEY"
@@ -386,4 +386,6 @@ Unit tests (Node's built-in `node:test`, no extra dependencies) cover the GSM-7/
 - Concatenated SMS is capped at 3 parts (see length limits above).
 - Serial driver, multipart: if a part fails mid-message, the parts already sent are never assembled by the recipient's phone (they are eventually discarded); a retry re-sends all parts under a fresh concatenation reference.
 - zte-http driver, multipart: relies on the firmware segmenting long bodies (the same mechanism its own web UI uses); verified message-level status comes from the same send-status poll as single SMS.
-- adb driver: send-only. The delivery status reflects that Android's telephony service *accepted* the message (the binder call returned cleanly), not end-to-end network delivery — there is no `+CMGS`/status poll like the other drivers. `/sms/messages` and `/sms/balance` are no-ops for adb modems (the shell lacks READ_SMS and there is no headless USSD). Multipart bodies go out as separate, non-concatenated messages. The `smsTxnCode` is build-specific — a wrong value makes every send fail.
+- adb driver: send-only by default. The delivery status reflects that Android's telephony service *accepted* the message (the binder call returned cleanly), not end-to-end network delivery — there is no `+CMGS`/status poll like the other drivers. Multipart bodies go out as separate, non-concatenated messages. The `smsTxnCode` is build-specific — a wrong value makes every send fail. `/sms/balance` and the other USSD endpoints stay no-ops for adb modems.
+  - **Inbox via the companion app**: installing [`android-smsbridge`](android-smsbridge/) gives an adb modem an inbox — it captures incoming SMS (which reach any `RECEIVE_SMS` holder on KitKat) to a file the driver drains in `/sms/messages`. Enabled automatically when the app is present; disable with `"smsBridge": false` on the modem's `MODEMS` entry. See that folder's README for build/install.
+  - **USSD stays unsupported on the UFI003S even with the app**: its SIM registers LTE-only with "CSS not supported", so the network releases every USSD session at the radio level. The app's dial-and-screen-scrape mechanism works, but there's nothing for it to capture. Balance/tariff/number are ZTE-only in practice.

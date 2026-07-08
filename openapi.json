@@ -25,7 +25,7 @@
             "application/json": {
               "schema": { "$ref": "#/components/schemas/SendRequest" },
               "example": {
-                "to": "+99361234567",
+                "to": "+99360123456",
                 "message": "Hello, this is a test SMS.",
                 "projectName": "E-Center"
               }
@@ -196,7 +196,7 @@
                     "messages": [
                       {
                         "status": "REC UNREAD",
-                        "from": "+99361234567",
+                        "from": "+99360123456",
                         "date": "26/07/06,12:30:00+20",
                         "text": "Hi",
                         "modemId": "zte"
@@ -675,7 +675,7 @@
             "type": "string",
             "pattern": "^\\+?[0-9]{7,15}$",
             "description": "Recipient in international format: 7–15 digits, optional leading `+`.",
-            "examples": ["+99361234567"]
+            "examples": ["+99360123456"]
           },
           "message": {
             "type": "string",
@@ -735,7 +735,7 @@
         "example": {
           "id": "7edf5906-55c5-4b57-b437-1502167c3ed6",
           "timestamp": "2026-07-06T10:00:00.000Z",
-          "to": "+99361234567",
+          "to": "+99360123456",
           "message": "Hello",
           "projectName": "E-Center",
           "ip": "::1",
@@ -870,7 +870,7 @@
             "schema": { "$ref": "#/components/schemas/Error" },
             "example": {
               "success": false,
-              "message": "to must be a phone number in international format, e.g. +99361234567"
+              "message": "to must be a phone number in international format, e.g. +99360123456"
             }
           }
         }
