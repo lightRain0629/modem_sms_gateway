@@ -250,7 +250,7 @@ Bull Board UI showing waiting/active/delayed/failed jobs, with retry and inspect
 
 ### API reference — `/docs`
 
-Interactive [Scalar](https://scalar.com) reference for every endpoint, with request/response schemas and a built-in "try it" client (enter the `API_KEY` once under Auth). Same login as the queue dashboard: any username, `API_KEY` as password.
+Interactive [Scalar](https://scalar.com) reference for every endpoint, with request/response schemas and a built-in "try it" client (enter the `API_KEY` once under Auth). The docs pages are public — the spec contains no secrets; actual API calls still require the key.
 
 The underlying OpenAPI 3.1 spec is the checked-in [`openapi.json`](openapi.json), also served at `/openapi.json` — import it into Postman/Insomnia or use it for client codegen. The docs page loads the Scalar bundle from its CDN, so the browser viewing it needs internet access; the spec itself is served locally. `npm test` checks the spec stays in sync with the router's routes.
 

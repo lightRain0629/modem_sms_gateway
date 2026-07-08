@@ -61,7 +61,7 @@ const checkBasicAuth = (req, res, next) => {
 app.use('/admin/queues', checkBasicAuth, serverAdapter.getRouter());
 
 // API reference — Scalar UI (loaded from its CDN) over the checked-in
-// OpenAPI spec. Same login as the queue dashboard.
+// OpenAPI spec. Public: the spec holds no secrets, only endpoint shapes.
 const DOCS_HTML = `<!doctype html>
 <html>
   <head>
@@ -78,10 +78,8 @@ const DOCS_HTML = `<!doctype html>
   </body>
 </html>`;
 
-app.get('/openapi.json', checkBasicAuth, (req, res) =>
-  res.sendFile(path.join(__dirname, 'openapi.json'))
-);
-app.get('/docs', checkBasicAuth, (req, res) => res.type('html').send(DOCS_HTML));
+app.get('/openapi.json', (req, res) => res.sendFile(path.join(__dirname, 'openapi.json')));
+app.get('/docs', (req, res) => res.type('html').send(DOCS_HTML));
 
 const server = app.listen(port, () => {
   console.log(`SMS API server running at http://localhost:${port}`);
