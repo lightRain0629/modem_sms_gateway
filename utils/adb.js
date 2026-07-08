@@ -136,6 +136,10 @@ function createAdbModem(config = {}) {
     getMessages: async () => [],
 
     // No headless USSD over adb.
+    supportsUssd: false,
+    runUssd: async () => {
+      throw new Error('USSD is not supported on the adb driver');
+    },
     checkBalance: async () => null,
 
     close: async () => {

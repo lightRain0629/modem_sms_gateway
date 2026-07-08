@@ -13,6 +13,7 @@ if (!process.env.API_KEY) {
 const router = require('./router/router');
 const pool = require('./utils/pool');
 const { sendSMSQueue, worker } = require('./config/bull.config');
+const { ussdQueue, ussdWorker } = require('./config/ussd.config');
 const { serverAdapter } = require('./config/bull-board.config');
 
 const port = process.env.PORT || 3000;
@@ -117,7 +118,9 @@ async function shutdown(signal) {
   server.close();
   try {
     await worker.close();
+    await ussdWorker.close();
     await sendSMSQueue.close();
+    await ussdQueue.close();
   } catch (e) {
     console.error('error closing queue:', e.message);
   }

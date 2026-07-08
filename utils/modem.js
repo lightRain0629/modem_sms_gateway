@@ -3,7 +3,7 @@
  *
  * createSerialModem(config) returns an independent instance so several sticks
  * can run in one process; config:
- *   { id, port, baudRate, smsc, ussdBalanceCode }
+ *   { id, port, baudRate, smsc, ussdBalanceCode, ussdTariffCode }
  */
 const { SerialPort } = require('serialport');
 const crypto = require('crypto');
@@ -40,6 +40,7 @@ function createSerialModem(config = {}) {
   const BAUD_RATE = parseInt(config.baudRate, 10) || 115200;
   const SMSC = (config.smsc || '').trim();
   const USSD_BALANCE_CODE = config.ussdBalanceCode || '*0800#';
+  const USSD_TARIFF_CODE = config.ussdTariffCode || '*0805#';
 
   // -------------------------------------------------------------------------
   // Connection state
@@ -299,6 +300,17 @@ function createSerialModem(config = {}) {
     }
   }
 
+  function runUssd(code) {
+    return enqueue(async () => {
+      await transact({ write: 'AT+CSCS="GSM"\r', label: 'CSCS' });
+      const urc = waitForUrc('+CUSD', USSD_TIMEOUT_MS);
+      await transact({ write: `AT+CUSD=1,"${code}",15\r`, label: 'CUSD' });
+      const line = await urc;
+      log(`ussd ${code} response:`, line || '(no +CUSD reply)');
+      return line;
+    });
+  }
+
   connect();
 
   // -------------------------------------------------------------------------
@@ -383,16 +395,14 @@ function createSerialModem(config = {}) {
         return result;
       }),
 
+    supportsUssd: true,
+    ussdCodes: { balance: USSD_BALANCE_CODE, tariff: USSD_TARIFF_CODE },
+
+    /** Run a USSD session; returns the raw +CUSD line (or null on no reply). */
+    runUssd,
+
     /** Query balance via USSD; returns the raw +CUSD line (or null on no reply). */
-    checkBalance: () =>
-      enqueue(async () => {
-        await transact({ write: 'AT+CSCS="GSM"\r', label: 'CSCS' });
-        const urc = waitForUrc('+CUSD', USSD_TIMEOUT_MS);
-        await transact({ write: `AT+CUSD=1,"${USSD_BALANCE_CODE}",15\r`, label: 'CUSD' });
-        const line = await urc;
-        log('balance response:', line || '(no +CUSD reply)');
-        return line;
-      }),
+    checkBalance: () => runUssd(USSD_BALANCE_CODE),
 
     close: () =>
       new Promise((resolve) => {

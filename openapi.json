@@ -242,7 +242,13 @@
         "parameters": [
           { "$ref": "#/components/parameters/Limit" },
           { "$ref": "#/components/parameters/Offset" },
-          { "$ref": "#/components/parameters/ModemFilter" }
+          { "$ref": "#/components/parameters/ModemFilter" },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Exact-match filter on the sender number (e.g. `0801` for the carrier's tariff SMS).",
+            "schema": { "type": "string" }
+          }
         ],
         "responses": {
           "200": {
@@ -275,13 +281,21 @@
     "/sms/balance": {
       "get": {
         "tags": ["Monitoring"],
-        "summary": "SIM balance via USSD",
-        "description": "Runs the configured USSD balance code on every modem (or one modem with `?modem=`) and returns the raw reply. **Slow**: a USSD round-trip takes 20–30 s per modem (modems are queried in parallel), and it holds the modem lock — queued sends wait until it finishes. Unsupported on `adb` modems.",
-        "operationId": "checkBalance",
-        "parameters": [{ "$ref": "#/components/parameters/ModemFilter" }],
+        "summary": "SIM balance (last known, or live via USSD)",
+        "description": "By default returns the newest **persisted** balance per modem (with `checkedAt`) from the USSD request history — instant, no modem interaction. With `?live=true` it runs the USSD balance code right now instead and persists the result: **slow** (a USSD round-trip takes 20–30 s per modem, queried in parallel) and it holds the modem lock — queued sends wait until it finishes. Unsupported on `adb` modems.",
+        "operationId": "getBalance",
+        "parameters": [
+          { "$ref": "#/components/parameters/ModemFilter" },
+          {
+            "name": "live",
+            "in": "query",
+            "description": "`true`/`1`: run the USSD session now instead of reading the stored value.",
+            "schema": { "type": "boolean", "default": false }
+          }
+        ],
         "responses": {
           "200": {
-            "description": "Per-modem balance replies. A modem that failed carries `balance: null` and an `error`.",
+            "description": "Per-modem balances. A modem with no answer carries `balance: null` and an `error`.",
             "content": {
               "application/json": {
                 "schema": {
@@ -304,8 +318,12 @@
                   "success": true,
                   "data": {
                     "balances": {
-                      "zte": { "balance": "Balans: 5.20 TMT" },
-                      "ufi": { "balance": null, "error": "Modem is not connected" }
+                      "zte": {
+                        "balance": "Balans: 5.20 TMT",
+                        "checkedAt": "2026-07-08T10:00:30.000Z",
+                        "requestId": "b2f0a1de-8c1a-4a86-9f0e-2d5c1f7f4c11"
+                      },
+                      "ufi": { "balance": null, "error": "USSD is not supported on the adb driver" }
                     }
                   }
                 }
@@ -314,6 +332,126 @@
           },
           "400": { "$ref": "#/components/responses/UnknownModem" },
           "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/sms/balance/refresh": {
+      "post": {
+        "tags": ["Monitoring"],
+        "summary": "Queue a balance USSD check",
+        "description": "Queues the USSD balance code on every USSD-capable modem (or one modem with `?modem=`) and returns immediately with one request id per modem. Poll `GET /sms/ussd/{id}` for the outcome; once `done`, `GET /sms/balance` serves the new value. Failed sessions are retried once after 15 s (retrying a silent USSD is safe — nothing is delivered twice).",
+        "operationId": "refreshBalance",
+        "parameters": [{ "$ref": "#/components/parameters/ModemFilter" }],
+        "responses": {
+          "202": { "$ref": "#/components/responses/UssdQueued" },
+          "400": { "$ref": "#/components/responses/UnknownModem" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "500": { "$ref": "#/components/responses/ServerError" }
+        }
+      }
+    },
+    "/sms/tariff/refresh": {
+      "post": {
+        "tags": ["Monitoring"],
+        "summary": "Queue a tariff USSD request",
+        "description": "Queues the USSD tariff code (default `*0805#`) on every USSD-capable modem (or one modem with `?modem=`). The USSD reply itself is only an acknowledgment — the carrier sends the actual plan details **as SMS** a little later (TMCell: from `0801`, one SMS per active tariff). After the session completes, the gateway sweeps the modem's inbox at +30 s / +90 s / +180 s so those SMS land in the database; read them with `GET /sms/inbox?from=0801`.",
+        "operationId": "refreshTariff",
+        "parameters": [{ "$ref": "#/components/parameters/ModemFilter" }],
+        "responses": {
+          "202": { "$ref": "#/components/responses/UssdQueued" },
+          "400": { "$ref": "#/components/responses/UnknownModem" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "500": { "$ref": "#/components/responses/ServerError" }
+        }
+      }
+    },
+    "/sms/ussd": {
+      "get": {
+        "tags": ["Monitoring"],
+        "summary": "Browse the USSD request history",
+        "description": "Every USSD session ever run — queued refreshes, `?live=true` checks and the automatic post-failure balance checks — newest first. Balance history over time lives here.",
+        "operationId": "listUssdRequests",
+        "parameters": [
+          { "$ref": "#/components/parameters/Limit" },
+          { "$ref": "#/components/parameters/Offset" },
+          {
+            "name": "kind",
+            "in": "query",
+            "description": "Exact-match filter on the request kind.",
+            "schema": { "$ref": "#/components/schemas/UssdKind" }
+          },
+          { "$ref": "#/components/parameters/ModemFilter" }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of USSD requests.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": { "type": "boolean", "const": true },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "requests": {
+                          "type": "array",
+                          "items": { "$ref": "#/components/schemas/UssdRequest" }
+                        },
+                        "total": { "type": "integer", "description": "Count matching the filters." }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "500": { "$ref": "#/components/responses/ServerError" }
+        }
+      }
+    },
+    "/sms/ussd/{id}": {
+      "get": {
+        "tags": ["Monitoring"],
+        "summary": "Status of one USSD request",
+        "description": "Returns the request created by a refresh endpoint. `status` is `pending` until the session completes, then `done` (with `reply`) or `failed` (with `error`).",
+        "operationId": "getUssdRequest",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "A request id returned by a refresh endpoint.",
+            "schema": { "type": "string", "format": "uuid" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The USSD request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": { "type": "boolean", "const": true },
+                    "data": { "$ref": "#/components/schemas/UssdRequest" }
+                  }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": {
+            "description": "No USSD request with that id.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" },
+                "example": { "success": false, "message": "USSD request not found" }
+              }
+            }
+          },
+          "500": { "$ref": "#/components/responses/ServerError" }
         }
       }
     },
@@ -566,8 +704,53 @@
       "BalanceResult": {
         "type": "object",
         "properties": {
-          "balance": { "type": ["string", "null"], "description": "Raw USSD reply, `null` on failure." },
-          "error": { "type": "string", "description": "Present when the check failed." }
+          "balance": { "type": ["string", "null"], "description": "Raw USSD reply, `null` when none is available." },
+          "checkedAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the balance was read from the SIM (may be old — refresh to update)."
+          },
+          "requestId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The underlying USSD request (see `GET /sms/ussd/{id}`)."
+          },
+          "error": { "type": "string", "description": "Present when no balance is available." }
+        }
+      },
+      "UssdKind": {
+        "type": "string",
+        "enum": ["balance", "tariff"],
+        "description": "`balance` — the reply itself carries the balance; `tariff` — the reply only acknowledges, the plan details arrive as SMS."
+      },
+      "UssdRequest": {
+        "type": "object",
+        "description": "One persisted USSD session.",
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "modemId": { "type": "string" },
+          "kind": { "$ref": "#/components/schemas/UssdKind" },
+          "code": { "type": "string", "description": "The USSD code that was (or will be) dialed." },
+          "status": {
+            "type": "string",
+            "enum": ["pending", "done", "failed"],
+            "description": "`pending` → queued or running; `done` → replied; `failed` → all attempts exhausted."
+          },
+          "reply": { "type": ["string", "null"], "description": "Raw USSD reply once `done`." },
+          "error": { "type": ["string", "null"], "description": "Last error once `failed`." },
+          "requestedAt": { "type": "string", "format": "date-time" },
+          "completedAt": { "type": ["string", "null"], "format": "date-time" }
+        },
+        "example": {
+          "id": "b2f0a1de-8c1a-4a86-9f0e-2d5c1f7f4c11",
+          "modemId": "zte",
+          "kind": "balance",
+          "code": "*0800#",
+          "status": "done",
+          "reply": "Balans: 5.20 TMT",
+          "error": null,
+          "requestedAt": "2026-07-08T10:00:00.000Z",
+          "completedAt": "2026-07-08T10:00:30.000Z"
         }
       },
       "ModemError": {
@@ -599,6 +782,37 @@
             "example": {
               "success": false,
               "message": "to must be a phone number in international format, e.g. +99361234567"
+            }
+          }
+        }
+      },
+      "UssdQueued": {
+        "description": "USSD sessions queued, one request per targeted modem.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "properties": {
+                "success": { "type": "boolean", "const": true },
+                "data": {
+                  "type": "object",
+                  "properties": {
+                    "message": { "type": "string" },
+                    "requests": {
+                      "type": "object",
+                      "description": "Request id per modem id — poll `GET /sms/ussd/{id}`.",
+                      "additionalProperties": { "type": "string", "format": "uuid" }
+                    }
+                  }
+                }
+              }
+            },
+            "example": {
+              "success": true,
+              "data": {
+                "message": "balance USSD queued",
+                "requests": { "zte": "b2f0a1de-8c1a-4a86-9f0e-2d5c1f7f4c11" }
+              }
             }
           }
         }

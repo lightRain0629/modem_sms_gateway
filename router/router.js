@@ -2,9 +2,18 @@ const { Router } = require('express');
 const crypto = require('crypto');
 const pool = require('../utils/pool');
 const { PHONE_RE } = require('../utils/sms-encoding');
+const { fetchAndStore } = require('../utils/inbox-sync');
 const { appendLog, updateLog, getLog, listSent, getMetrics } = require('../store/log-store');
-const { saveReceived, listReceived } = require('../store/inbox-store');
+const { listReceived } = require('../store/inbox-store');
+const {
+  createRequest,
+  completeRequest,
+  getRequest,
+  latestDone,
+  listRequests,
+} = require('../store/ussd-store');
 const { sendSMSQueue } = require('../config/bull.config');
+const { enqueueUssd } = require('../config/ussd.config');
 
 const router = Router();
 
@@ -120,12 +129,7 @@ router.get('/messages', async (req, res) => {
   const results = await Promise.all(
     targets.map(async (m) => {
       try {
-        // saved to the DB (tagged with the modem id) before the driver
-        // deletes them from the modem
-        const messages = await m.getMessages((msgs) =>
-          saveReceived(msgs.map((x) => ({ ...x, modemId: m.id })))
-        );
-        return { modem: m.id, messages: messages.map((x) => ({ ...x, modemId: m.id })) };
+        return { modem: m.id, messages: await fetchAndStore(m) };
       } catch (err) {
         return { modem: m.id, error: err.message };
       }
@@ -149,7 +153,12 @@ router.get('/inbox', async (req, res) => {
   try {
     const limit = parseLimit(req.query.limit);
     const offset = parseOffset(req.query.offset);
-    const messages = await listReceived({ limit, offset, modemId: filter(req.query.modem) });
+    const messages = await listReceived({
+      limit,
+      offset,
+      modemId: filter(req.query.modem),
+      from: filter(req.query.from),
+    });
     return res.json({ success: true, data: { messages } });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
@@ -174,29 +183,131 @@ router.get('/sent', async (req, res) => {
   }
 });
 
-// On-demand USSD balance check. Slow: a USSD session takes 20-30s per modem
-// (they run in parallel), and it holds the modem mutex — sends queue behind it.
+function unknownModem(res, modemId) {
+  return res.status(400).json({
+    success: false,
+    message: `Unknown modem "${modemId}" — available: ${pool.ids().join(', ')}`,
+  });
+}
+
+// Run one USSD session right now (holding the modem mutex), persisting the
+// outcome to ussd_requests like the queued path does.
+async function runUssdNow(modem, kind) {
+  const request = {
+    id: crypto.randomUUID(),
+    modemId: modem.id,
+    kind,
+    code: modem.ussdCodes[kind],
+    status: 'pending',
+    requestedAt: new Date().toISOString(),
+  };
+  await createRequest(request);
+  try {
+    const reply = await modem.runUssd(request.code);
+    if (!reply) {
+      await completeRequest(request.id, { status: 'failed', error: 'No USSD reply' });
+      return { balance: null, error: 'No USSD reply', requestId: request.id };
+    }
+    const done = await completeRequest(request.id, { status: 'done', reply });
+    return { balance: reply, checkedAt: done.completedAt, requestId: request.id };
+  } catch (err) {
+    await completeRequest(request.id, { status: 'failed', error: err.message }).catch(() => {});
+    return { balance: null, error: err.message, requestId: request.id };
+  }
+}
+
+// Last known balance per modem, from the persisted USSD history. ?live=true
+// runs the USSD session now instead — slow (20-30s per modem, in parallel)
+// and it holds the modem mutex, so queued sends wait behind it.
 router.get('/balance', async (req, res) => {
   const modemId = filter(req.query.modem);
-  if (modemId && !pool.get(modemId)) {
-    return res.status(400).json({
-      success: false,
-      message: `Unknown modem "${modemId}" — available: ${pool.ids().join(', ')}`,
-    });
-  }
+  if (modemId && !pool.get(modemId)) return unknownModem(res, modemId);
   const targets = modemId ? [pool.get(modemId)] : pool.all();
+  const live = req.query.live === 'true' || req.query.live === '1';
 
   const entries = await Promise.all(
     targets.map(async (m) => {
-      try {
-        const balance = await m.checkBalance();
-        return [m.id, balance ? { balance } : { balance: null, error: 'No USSD reply' }];
-      } catch (err) {
-        return [m.id, { balance: null, error: err.message }];
+      if (!m.supportsUssd) {
+        return [m.id, { balance: null, error: `USSD is not supported on the ${m.driver} driver` }];
       }
+      if (live) return [m.id, await runUssdNow(m, 'balance')];
+      const last = await latestDone(m.id, 'balance');
+      return [
+        m.id,
+        last
+          ? { balance: last.reply, checkedAt: last.completedAt, requestId: last.id }
+          : {
+              balance: null,
+              error: 'No stored balance yet — POST /sms/balance/refresh or use ?live=true',
+            },
+      ];
     })
   );
   return res.json({ success: true, data: { balances: Object.fromEntries(entries) } });
+});
+
+// Queue a USSD session per modem and return immediately; poll
+// GET /sms/ussd/:id for the outcome.
+function queueUssdRefresh(kind) {
+  return async (req, res) => {
+    const modemId = filter(req.query.modem);
+    if (modemId && !pool.get(modemId)) return unknownModem(res, modemId);
+    if (modemId && !pool.get(modemId).supportsUssd) {
+      return res.status(400).json({
+        success: false,
+        message: `USSD is not supported on modem "${modemId}" (${pool.get(modemId).driver} driver)`,
+      });
+    }
+    const targets = (modemId ? [pool.get(modemId)] : pool.all()).filter((m) => m.supportsUssd);
+    if (targets.length === 0) {
+      return res.status(400).json({ success: false, message: 'No USSD-capable modems configured' });
+    }
+
+    try {
+      const requests = await Promise.all(targets.map((m) => enqueueUssd(m, kind)));
+      return res.status(202).json({
+        success: true,
+        data: {
+          message: `${kind} USSD queued`,
+          requests: Object.fromEntries(requests.map((r) => [r.modemId, r.id])),
+        },
+      });
+    } catch (err) {
+      return res.status(500).json({ success: false, message: err.message });
+    }
+  };
+}
+
+router.post('/balance/refresh', queueUssdRefresh('balance'));
+// The tariff reply arrives as SMS (e.g. from 0801, one per active tariff)
+// minutes later; the worker sweeps the inbox afterwards, so check
+// GET /sms/inbox?from=0801 for the actual plan details.
+router.post('/tariff/refresh', queueUssdRefresh('tariff'));
+
+router.get('/ussd', async (req, res) => {
+  try {
+    const { requests, total } = await listRequests({
+      limit: parseLimit(req.query.limit),
+      offset: parseOffset(req.query.offset),
+      kind: filter(req.query.kind),
+      modemId: filter(req.query.modem),
+    });
+    return res.json({ success: true, data: { requests, total } });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+router.get('/ussd/:id', async (req, res) => {
+  try {
+    const request = await getRequest(req.params.id);
+    if (!request) {
+      return res.status(404).json({ success: false, message: 'USSD request not found' });
+    }
+    return res.json({ success: true, data: request });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
 });
 
 router.get('/metrics', async (req, res) => {

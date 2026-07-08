@@ -34,6 +34,19 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_recv_from        ON received_messages(from_number);
   CREATE INDEX IF NOT EXISTS idx_recv_received_at ON received_messages(received_at);
+
+  CREATE TABLE IF NOT EXISTS ussd_requests (
+    id           TEXT PRIMARY KEY,
+    modem_id     TEXT NOT NULL,
+    kind         TEXT NOT NULL,
+    code         TEXT NOT NULL,
+    status       TEXT NOT NULL,
+    reply        TEXT,
+    error        TEXT,
+    requested_at TEXT NOT NULL,
+    completed_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_ussd_modem_kind ON ussd_requests(modem_id, kind, requested_at);
 `);
 
 // Migration for databases created before multi-modem support.

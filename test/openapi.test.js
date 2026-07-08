@@ -11,6 +11,10 @@ const EXPECTED = {
   '/sms/messages': ['get'],
   '/sms/inbox': ['get'],
   '/sms/balance': ['get'],
+  '/sms/balance/refresh': ['post'],
+  '/sms/tariff/refresh': ['post'],
+  '/sms/ussd': ['get'],
+  '/sms/ussd/{id}': ['get'],
   '/sms/metrics': ['get'],
   '/sms/health': ['get'],
 };
