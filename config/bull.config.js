@@ -4,6 +4,7 @@ const { connection } = require('./redis.config');
 const { enqueueUssd } = require('./ussd.config');
 const pool = require('../utils/pool');
 const { updateLog } = require('../store/log-store');
+const { enqueueWebhook } = require('./webhook.config');
 
 const MODEM_READY_TIMEOUT_MS = 30000;
 const BALANCE_CHECK_MIN_INTERVAL_MS = 10 * 60 * 1000;
@@ -66,13 +67,15 @@ const worker = new Worker(
     }
 
     try {
-      await updateLog(logId, {
+      const entry = await updateLog(logId, {
         status: 'sent',
         sentAt: new Date().toISOString(),
         reference: result.reference,
         modemId: modem.id,
         error: null,
       });
+      // enqueueWebhook never throws — a callback problem must not re-send the SMS
+      await enqueueWebhook(entry, { attempt: job.attemptsMade });
     } catch (e) {
       // never fail (and re-send) a delivered SMS over a log write error
       console.error('[queue] log update failed after send:', e.message);
@@ -121,11 +124,13 @@ worker.on('failed', async (job, err) => {
   );
 
   try {
-    await updateLog(job.data.logId, {
+    const entry = await updateLog(job.data.logId, {
       status: unconfirmed ? 'unconfirmed' : isFinal ? 'failed' : 'retrying',
       error: err.message,
       ...(err.modemId ? { modemId: err.modemId } : {}),
     });
+    // `retrying` only fires a callback when WEBHOOK_SEND_INTERMEDIATE is set
+    await enqueueWebhook(entry, { attempt: job.attemptsMade });
   } catch (e) {
     console.error('[queue] could not update log:', e.message);
   }

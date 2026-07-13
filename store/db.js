@@ -58,6 +58,11 @@ function addColumnIfMissing(table, column, ddl) {
 }
 addColumnIfMissing('sent_messages', 'modem_id', 'modem_id TEXT');
 addColumnIfMissing('received_messages', 'modem_id', 'modem_id TEXT');
+// Delivery-status webhooks: an opaque caller id echoed back in every callback,
+// and the per-send URL the gateway POSTs status transitions to. Stored on the
+// row so a callback still fires after a restart, once the BullMQ job is pruned.
+addColumnIfMissing('sent_messages', 'client_ref', 'client_ref TEXT');
+addColumnIfMissing('sent_messages', 'callback_url', 'callback_url TEXT');
 
 // One-time migration from the old sent.json log. Runs only when the table is
 // empty; the file is renamed afterwards so it never imports twice.

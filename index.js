@@ -14,6 +14,7 @@ const router = require('./router/router');
 const pool = require('./utils/pool');
 const { sendSMSQueue, worker } = require('./config/bull.config');
 const { ussdQueue, ussdWorker } = require('./config/ussd.config');
+const { webhookQueue, webhookWorker } = require('./config/webhook.config');
 const { serverAdapter } = require('./config/bull-board.config');
 
 const port = process.env.PORT || 3000;
@@ -119,8 +120,10 @@ async function shutdown(signal) {
   try {
     await worker.close();
     await ussdWorker.close();
+    await webhookWorker.close();
     await sendSMSQueue.close();
     await ussdQueue.close();
+    await webhookQueue.close();
   } catch (e) {
     console.error('error closing queue:', e.message);
   }
