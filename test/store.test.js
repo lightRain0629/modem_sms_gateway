@@ -50,6 +50,31 @@ test('updateLog patches only whitelisted fields', async () => {
   assert.equal(await updateLog('missing', { status: 'sent' }), null);
 });
 
+test('clientRef / callbackUrl round-trip and clientRef filter', async () => {
+  await appendLog(
+    entry('wh1', { clientRef: 'distributionRecipient:12345', callbackUrl: 'https://x.test/cb' })
+  );
+  const got = await getLog('wh1');
+  assert.equal(got.clientRef, 'distributionRecipient:12345');
+  assert.equal(got.callbackUrl, 'https://x.test/cb');
+
+  // updateLog returns the full row (incl. the passthrough fields) so the
+  // webhook hook can read them without a second query
+  const updated = await updateLog('wh1', { status: 'sent', reference: '+CMGS: 1' });
+  assert.equal(updated.clientRef, 'distributionRecipient:12345');
+  assert.equal(updated.callbackUrl, 'https://x.test/cb');
+
+  // omitted → null, and callbackUrl/clientRef are not patchable
+  await appendLog(entry('wh2'));
+  const bare = await getLog('wh2');
+  assert.equal(bare.clientRef, null);
+  assert.equal(bare.callbackUrl, null);
+
+  const byRef = await listSent({ clientRef: 'distributionRecipient:12345' });
+  assert.equal(byRef.total, 1);
+  assert.equal(byRef.messages[0].id, 'wh1');
+});
+
 test('listSent: pagination, ordering, filters and total', async () => {
   const base = Date.parse('2026-07-07T00:00:00Z');
   for (let i = 0; i < 5; i++) {

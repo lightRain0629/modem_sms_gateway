@@ -130,6 +130,8 @@ Request body:
   Concatenated parts are shorter than a single SMS because each part carries a 6-byte concatenation header. Without a pinned `modem`, the message must fit **every** configured modem's limits (round-robin can pick any of them). The **adb** driver sends a multi-part body as several *independent* messages (it has no way to attach the concatenation header), so the recipient sees separate SMS rather than one merged message.
 - `projectName` — required, stored in the delivery log
 - `modem` — optional modem id; pins the send to that modem instead of round-robin
+- `clientRef` — optional opaque passthrough id (≤200 chars). Stored on the row and echoed in every delivery-status callback (see [Delivery-status webhooks](#delivery-status-webhooks)); lets a caller map a callback to its own record with no lookup.
+- `callbackUrl` — optional http(s) URL the gateway POSTs each status transition to. Must be on `WEBHOOK_ALLOWED_HOSTS` when that allowlist is set. Omit it to fall back to the global `WEBHOOK_DEFAULT_URL` (if configured).
 
 > **Carrier content filtering:** some operators (observed with TMCell) silently reject messages containing `http` — the send fails at the network with no error detail. Avoid URLs in message bodies.
 
@@ -167,6 +169,52 @@ Validation errors return `400` with `{ "success": false, "message": "..." }`.
 
 `modemId` is the modem that carried (or last attempted) the message; `null` while the send is still pending on a round-robin job. `status` is one of `pending`, `retrying`, `sent`, `failed`, `unconfirmed`. On `retrying`/`failed`, `error` contains the last modem error. `unconfirmed` means the message was handed to the modem but the confirmation timed out — it is **not retried** (a retry could deliver the SMS twice); check the recipient or the modem before re-sending manually.
 
+### Delivery-status webhooks
+
+Instead of polling `GET /sms/status/:logId`, a caller can supply a `callbackUrl` on `POST /sms/send` and the gateway will **POST each status transition** to it. Polling stays available as a reconciliation fallback.
+
+**What each status really means** — the webhook delivers the existing statuses in real time; it does **not** add handset delivery truth. No driver produces a delivery receipt (DLR), so `delivered`/`read` are out of scope — a caller's UI must cap SMS at `sent`.
+
+| Status | Real meaning | Do **not** read as |
+|---|---|---|
+| `pending` | Row created, queued (no callback — the `202` already said this) | — |
+| `retrying` | An attempt failed; another is scheduled | failure |
+| `sent` | A modem **accepted** the message (`+CMGS` ack / zte send-state) | delivered to the handset |
+| `failed` | All 3 attempts exhausted (`error` set; empty SIM balance is common) | — |
+| `unconfirmed` | Modem ack timed out — **may already be with the network** | failed — do **not** auto-resend |
+
+**Which transitions fire:** `sent`, `failed`, `unconfirmed` always; `retrying` only when `WEBHOOK_SEND_INTERMEDIATE=true`; never `pending`.
+
+**Payload** (`POST` `application/json` to `callbackUrl`):
+
+```json
+{
+  "event": "sms.status",
+  "logId": "7edf5906-55c5-4b57-b437-1502167c3ed6",
+  "clientRef": "distributionRecipient:12345",
+  "to": "+99360123456",
+  "projectName": "GSR-API",
+  "status": "sent",
+  "reference": "+CMGS: 12",
+  "modemId": "zte",
+  "error": null,
+  "sentAt": "2026-07-13T10:00:04.000Z",
+  "occurredAt": "2026-07-13T10:00:04.120Z",
+  "attempt": 1
+}
+```
+
+**Signing:** every callback carries
+
+- `X-Gateway-Timestamp: <unix-ms>`
+- `X-Gateway-Signature: sha256=<hex>` where the hex is `HMAC-SHA256(WEBHOOK_SIGNING_SECRET, "<timestamp>.<rawBody>")` over the exact request bytes.
+
+The receiver recomputes the HMAC over the raw body + the timestamp header and rejects on mismatch, and should reject timestamps older than a few minutes (replay protection). When `WEBHOOK_SIGNING_SECRET` is unset the gateway sends callbacks **unsigned** and logs a startup warning.
+
+**Delivery guarantees:** callbacks go through a dedicated BullMQ queue — `attempts: 5`, exponential backoff (~15s/30s/60s/120s), 5s timeout, non-2xx retried (a `4xx` other than `408`/`429` is treated as a permanent reject and dropped). This is **at-least-once**: receivers must be idempotent (key on `logId`+`status`) and tolerate out-of-order arrival (order by `occurredAt`, not receipt). The `callback_url` is stored on the row, so a callback still fires after a gateway restart even once the send job has been pruned. Failed callback jobs are retained (`removeOnFail: 1000`) and visible in the [queue dashboard](#queue-dashboard--adminqueues).
+
+Configure via `WEBHOOK_SIGNING_SECRET`, `WEBHOOK_ALLOWED_HOSTS` (SSRF allowlist), `WEBHOOK_DEFAULT_URL`, `WEBHOOK_SEND_INTERMEDIATE`, `WEBHOOK_TIMEOUT_MS` — see `.env.example`.
+
 ### GET `/sms/messages` — fetch new messages from the modems
 
 Reads all SMS stored on every modem's SIM/device (or one modem with `?modem=<id>`), **saves them to the database**, then deletes only the messages that were read (a message arriving during the read is kept for next time; if the DB write fails, nothing is deleted).
@@ -186,7 +234,7 @@ If some (but not all) modems fail to answer, the reply additionally carries `dat
 
 ### GET `/sms/sent` — browse the delivery log
 
-Query params: `limit` (default 50, max 500), `offset`, and optional equality filters `status`, `projectName`, `to`, `modem`. Newest first; `total` is the count matching the filters. Each entry carries `modemId`.
+Query params: `limit` (default 50, max 500), `offset`, and optional equality filters `status`, `projectName`, `to`, `modem`, `clientRef`. Newest first; `total` is the count matching the filters. Each entry carries `modemId` (and `clientRef`/`callbackUrl` when set) — handy for reconciling missed webhook callbacks.
 
 ```json
 {

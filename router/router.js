@@ -14,11 +14,18 @@ const {
 } = require('../store/ussd-store');
 const { sendSMSQueue } = require('../config/bull.config');
 const { enqueueUssd } = require('../config/ussd.config');
+const { enqueueWebhook } = require('../config/webhook.config');
+const { parseAllowedHosts, isAllowedUrl } = require('../utils/webhook');
 
 const router = Router();
 
 // control chars other than \n and \r would corrupt the AT dialogue
 const CONTROL_CHARS_RE = /[\x00-\x09\x0B\x0C\x0E-\x1F]/;
+
+// Callback-URL allowlist for delivery-status webhooks — same env the sender
+// enforces, so a URL rejected at send time can never reach the queue.
+const WEBHOOK_ALLOWED_HOSTS = parseAllowedHosts(process.env.WEBHOOK_ALLOWED_HOSTS);
+const CLIENT_REF_MAX = 200;
 
 function validateSend(req, res, next) {
   const body = req.body || {};
@@ -49,6 +56,29 @@ function validateSend(req, res, next) {
     });
   }
 
+  // Optional delivery-status webhook fields (both additive, both passthrough).
+  const { clientRef, callbackUrl } = body;
+  if (clientRef !== undefined) {
+    if (typeof clientRef !== 'string' || clientRef.trim().length > CLIENT_REF_MAX) {
+      return res.status(400).json({
+        success: false,
+        message: `clientRef must be a string of at most ${CLIENT_REF_MAX} characters`,
+      });
+    }
+    // empty-after-trim collapses to null so callers can't smuggle "" as an id
+    req.body.clientRef = clientRef.trim() || null;
+  }
+  if (callbackUrl !== undefined) {
+    if (typeof callbackUrl !== 'string' || !isAllowedUrl(callbackUrl, WEBHOOK_ALLOWED_HOSTS)) {
+      return res.status(400).json({
+        success: false,
+        message:
+          'callbackUrl must be a valid http(s) URL' +
+          (WEBHOOK_ALLOWED_HOSTS.size ? ' on an allowed host' : ''),
+      });
+    }
+  }
+
   // Without a pinned modem the job goes round-robin, so the message must fit
   // every modem's limits (drivers differ: zte-http is UCS2-only, 70/67 chars).
   const candidates = modemId ? [pool.get(modemId)] : pool.all();
@@ -70,7 +100,7 @@ function validateSend(req, res, next) {
 }
 
 router.post('/send', validateSend, async (req, res) => {
-  const { to, message, projectName, modem } = req.body;
+  const { to, message, projectName, modem, clientRef, callbackUrl } = req.body;
   const logEntry = {
     id: crypto.randomUUID(),
     timestamp: new Date().toISOString(),
@@ -82,6 +112,10 @@ router.post('/send', validateSend, async (req, res) => {
     error: null,
     // recorded when actually sent; pinned sends know their modem up front
     modemId: modem ?? null,
+    // delivery-status webhook passthrough; stored so a callback survives a
+    // restart (the BullMQ send job is pruned, the row is durable)
+    clientRef: clientRef ?? null,
+    callbackUrl: callbackUrl ?? null,
   };
 
   try {
@@ -94,7 +128,10 @@ router.post('/send', validateSend, async (req, res) => {
   } catch (err) {
     // the entry may already be persisted as 'pending' — don't leave it
     // claiming an in-flight send that was never enqueued
-    await updateLog(logEntry.id, { status: 'failed', error: err.message }).catch(() => {});
+    const failed = await updateLog(logEntry.id, { status: 'failed', error: err.message }).catch(
+      () => null
+    );
+    if (failed) await enqueueWebhook(failed);
     return res.status(500).json({ success: false, message: err.message });
   }
 });
@@ -176,6 +213,7 @@ router.get('/sent', async (req, res) => {
       projectName: filter(req.query.projectName),
       to: filter(req.query.to),
       modemId: filter(req.query.modem),
+      clientRef: filter(req.query.clientRef),
     });
     return res.json({ success: true, data: { messages, total, limit, offset } });
   } catch (err) {

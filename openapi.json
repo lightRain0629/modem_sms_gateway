@@ -690,6 +690,18 @@
           "modem": {
             "type": "string",
             "description": "Optional modem id; pins the send to that modem instead of round-robin."
+          },
+          "clientRef": {
+            "type": "string",
+            "maxLength": 200,
+            "description": "Optional opaque passthrough id. Stored on the message row and echoed back in every delivery-status callback (see the Webhooks section), letting the caller map a callback to its own record without a lookup.",
+            "examples": ["distributionRecipient:12345"]
+          },
+          "callbackUrl": {
+            "type": "string",
+            "format": "uri",
+            "description": "Optional http(s) URL the gateway POSTs each status transition to (see `WebhookPayload`). Must be on `WEBHOOK_ALLOWED_HOSTS` when that allowlist is configured. Falls back to the global `WEBHOOK_DEFAULT_URL` when omitted.",
+            "examples": ["https://daily.gsr.net/api/sms/callback"]
           }
         }
       },
@@ -730,7 +742,15 @@
             "type": ["string", "null"],
             "description": "The modem that carried (or last attempted) the message; `null` while the send is still pending on a round-robin job."
           },
-          "error": { "type": ["string", "null"], "description": "Last modem error on `retrying`/`failed`." }
+          "error": { "type": ["string", "null"], "description": "Last modem error on `retrying`/`failed`." },
+          "clientRef": {
+            "type": ["string", "null"],
+            "description": "Opaque passthrough id supplied on `POST /sms/send`; echoed in every callback."
+          },
+          "callbackUrl": {
+            "type": ["string", "null"],
+            "description": "Delivery-status callback URL supplied on `POST /sms/send`."
+          }
         },
         "example": {
           "id": "7edf5906-55c5-4b57-b437-1502167c3ed6",
@@ -743,7 +763,41 @@
           "sentAt": "2026-07-06T10:00:04.000Z",
           "reference": "+CMGS: 12",
           "modemId": "zte",
-          "error": null
+          "error": null,
+          "clientRef": "distributionRecipient:12345",
+          "callbackUrl": "https://daily.gsr.net/api/sms/callback"
+        }
+      },
+      "WebhookPayload": {
+        "type": "object",
+        "description": "Body POSTed to a send's `callbackUrl` on every acted-on status transition (terminal states always; `retrying` only when `WEBHOOK_SEND_INTERMEDIATE=true`). NOT sent for `pending`. Signed with headers `X-Gateway-Timestamp: <unix-ms>` and `X-Gateway-Signature: sha256=<hex HMAC-SHA256 of \"<timestamp>.<rawBody>\" keyed by WEBHOOK_SIGNING_SECRET>`. Delivered at-least-once via a retrying BullMQ queue, so receivers must be idempotent (key on logId+status) and tolerate out-of-order arrival (use occurredAt). The webhook only relays these statuses in real time — no driver produces a handset delivery receipt, so `delivered`/`read` are out of scope.",
+        "properties": {
+          "event": { "type": "string", "const": "sms.status" },
+          "logId": { "type": "string", "format": "uuid" },
+          "clientRef": { "type": ["string", "null"] },
+          "to": { "type": "string" },
+          "projectName": { "type": ["string", "null"] },
+          "status": { "$ref": "#/components/schemas/DeliveryStatus" },
+          "reference": { "type": ["string", "null"] },
+          "modemId": { "type": ["string", "null"] },
+          "error": { "type": ["string", "null"] },
+          "sentAt": { "type": ["string", "null"], "format": "date-time" },
+          "occurredAt": { "type": "string", "format": "date-time", "description": "When the transition was recorded." },
+          "attempt": { "type": ["integer", "null"], "description": "Send-job attempt number this outcome came from (best-effort)." }
+        },
+        "example": {
+          "event": "sms.status",
+          "logId": "7edf5906-55c5-4b57-b437-1502167c3ed6",
+          "clientRef": "distributionRecipient:12345",
+          "to": "+99360123456",
+          "projectName": "GSR-API",
+          "status": "sent",
+          "reference": "+CMGS: 12",
+          "modemId": "zte",
+          "error": null,
+          "sentAt": "2026-07-13T10:00:04.000Z",
+          "occurredAt": "2026-07-13T10:00:04.120Z",
+          "attempt": 1
         }
       },
       "ModemMessage": {

@@ -12,9 +12,11 @@ const PATCHABLE = {
 
 const insertStmt = db.prepare(`
   INSERT INTO sent_messages
-    (id, timestamp, to_number, message, project_name, ip, status, error, sent_at, reference, modem_id)
+    (id, timestamp, to_number, message, project_name, ip, status, error, sent_at, reference, modem_id,
+     client_ref, callback_url)
   VALUES
-    (@id, @timestamp, @to, @message, @projectName, @ip, @status, @error, @sentAt, @reference, @modemId)
+    (@id, @timestamp, @to, @message, @projectName, @ip, @status, @error, @sentAt, @reference, @modemId,
+     @clientRef, @callbackUrl)
 `);
 
 const getStmt = db.prepare('SELECT * FROM sent_messages WHERE id = ?');
@@ -33,6 +35,8 @@ function toEntry(row) {
     sentAt: row.sent_at,
     reference: row.reference,
     modemId: row.modem_id,
+    clientRef: row.client_ref,
+    callbackUrl: row.callback_url,
   };
 }
 
@@ -52,6 +56,8 @@ exports.appendLog = async (entry) => {
     sentAt: entry.sentAt ?? null,
     reference: entry.reference ?? null,
     modemId: entry.modemId ?? null,
+    clientRef: entry.clientRef ?? null,
+    callbackUrl: entry.callbackUrl ?? null,
   });
   return entry;
 };
@@ -79,6 +85,7 @@ const FILTERS = {
   projectName: 'project_name',
   to: 'to_number',
   modemId: 'modem_id',
+  clientRef: 'client_ref',
 };
 
 function buildWhere(filters) {
