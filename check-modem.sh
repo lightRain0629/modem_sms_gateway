@@ -99,6 +99,7 @@ fi
 # ---- per-stick probe -------------------------------------------------------
 CURL_TIMEOUT=5
 overall=0
+overall_route=0   # set if any modem owns a default route (internet-hijack risk)
 
 probe_one() {
   local id="$1" host="$2" api="$3"
@@ -116,12 +117,24 @@ probe_one() {
     local dev
     dev=$(ip route get "$host" 2>/dev/null | grep -oE 'dev [^ ]+' | awk '{print $2}' | head -1)
     if [ -n "$dev" ]; then pass "route to $host via '$dev'"; else warn "no route to $host — interface for this subnet not up"; ok=0; fi
+
+    # A HiLink stick advertises itself as a gateway over DHCP. If the host
+    # installed a default route via this modem, general internet traffic can
+    # silently route over the SIM's cellular data — see README
+    # "Keep modems off the host's default route". Flag it (does not fail).
+    if ip route show default 2>/dev/null | grep -q "via $host "; then
+      overall_route=1
+      warn "this modem advertises a DEFAULT route (via $host) — host internet may go over its SIM"
+      info "fix: make the interface never-default (README: 'Keep modems off the host default route')"
+    fi
   fi
 
   # 2) TCP/HTTP reachability of the stick's web server
+  local http_ok=0 soft=0
   if need curl; then
     if curl -s -o /dev/null -m "$CURL_TIMEOUT" "$base/"; then
       pass "HTTP reachable  $base/"
+      http_ok=1
     else
       fail "no HTTP response from $base/ (stick unplugged, wrong IP, or wrong mode)"
       ok=0
@@ -134,6 +147,13 @@ probe_one() {
     body=$(curl -s -m "$CURL_TIMEOUT" -H "Referer: $base/index.html" -H "X-Requested-With: XMLHttpRequest" "$url" 2>/dev/null)
     if printf '%s' "$body" | grep -q '{'; then
       pass "API responded  ${D}$(printf '%s' "$body" | tr -d '\n' | cut -c1-60)${N}"
+    elif [ "$api" = "reqproc" ] && [ "$http_ok" -eq 1 ]; then
+      # reqproc builds (OLAX U90...) gate reads behind a web-UI login tracked by
+      # client IP; an unauthenticated probe gets no JSON, but the driver logs in
+      # itself before every call. HTTP + route already prove the transport.
+      soft=1
+      warn "API gave no JSON — normal for reqproc: reads are login-gated, the driver logs in itself"
+      info "transport is proven (route + HTTP ok); confirm with one real send to your safe number"
     else
       fail "API endpoint $getp gave no JSON — driver would fail here"
       [ -n "$body" ] && info "raw: $(printf '%s' "$body" | tr -d '\n' | cut -c1-80)"
@@ -144,7 +164,9 @@ probe_one() {
     ok=0
   fi
 
-  if [ "$ok" -eq 1 ]; then
+  if [ "$ok" -eq 1 ] && [ "$soft" -eq 1 ]; then
+    printf '  %s→ %s is READY (login-gated; verify with a send)%s\n' "$Y" "$id" "$N"
+  elif [ "$ok" -eq 1 ]; then
     printf '  %s→ %s is READY for the gateway%s\n' "$G" "$id" "$N"
   else
     printf '  %s→ %s is NOT reachable — see failures above%s\n' "$R" "$id" "$N"
@@ -159,11 +181,15 @@ done
 
 hdr "Result"
 if [ "$overall" -eq 0 ]; then
-  printf '  %sAll probed sticks answered their API — transport is good, WiFi not needed.%s\n' "$G" "$N"
+  printf '  %sAll probed sticks are reachable — transport is good, WiFi not needed.%s\n' "$G" "$N"
 else
   printf '  %sOne or more sticks failed. Common fixes:%s\n' "$R" "$N"
   info "stick in storage/CD-ROM mode  -> sudo usb_modeswitch, or switch it to HiLink/NDIS mode"
   info "no interface / no route       -> replug; check 'ip addr'; RNDIS needs the rndis_host kernel module (native on Linux)"
   info "HTTP ok but API empty         -> wrong 'api' (goform vs reqproc) for this model"
+fi
+if [ "$overall_route" -eq 1 ]; then
+  printf '\n  %sHeads-up:%s a modem owns the host default route — internet may route over its SIM.\n' "$Y" "$N"
+  info "make the modem interfaces never-default; see README 'Keep modems off the host default route'"
 fi
 exit "$overall"
