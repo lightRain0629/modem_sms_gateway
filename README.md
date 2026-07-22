@@ -91,6 +91,48 @@ A small HTTP API that sends and receives SMS through one or more USB GSM modems.
 
    On startup you should see `[modem] connected to /dev/ttyUSB0 @ 115200` followed by `[modem] initialized`. If the modem is unplugged the server keeps running and retries the connection every 5 seconds.
 
+## HiLink / ZTE sticks on Linux (no WiFi needed)
+
+The `zte-http` sticks (ZTE M100-3, OLAX U90, MF823…) are **not** WiFi devices. Plugged into USB they emulate a network adapter (RNDIS / CDC-ECM); the host gets a wired-style interface (`usb0` / `enx…`) and a DHCP lease, and the stick's web API lives at the gateway IP on that interface (`192.168.0.1` for goform, `172.16.0.1` for OLAX reqproc). Every request the driver makes goes **out the USB cable**, so a headless server with no WiFi runs the fleet fine. Linux has the `rndis_host` / `cdc_ether` modules built in, so the sticks enumerate automatically (unlike macOS, which lacks an RNDIS driver).
+
+**Verify a stick without starting the gateway** — `./check-modem.sh` probes route + HTTP + the real goform/reqproc API for each stick and prints a clear pass/fail:
+
+```bash
+./check-modem.sh                                  # reads MODEMS from .env, else fleet defaults
+./check-modem.sh olax:172.16.0.1:reqproc          # one explicit id:host:api
+```
+
+reqproc sticks (OLAX U90) gate their reads behind a web-UI login, so the script's unauthenticated read shows **"READY (login-gated; verify with a send)"** once route + HTTP pass — the driver logs in itself, so that's expected; confirm with one real send.
+
+### Keep modems off the host default route
+
+A HiLink stick advertises itself as a gateway over DHCP, so Linux installs a **default route via the modem**. With several sticks the lowest-metric one wins and **all host internet silently routes over that SIM's cellular data** — bad on a server (metered, slow, flaps with signal). The modems only need their own `/24` subnet to be reachable, never the default route. `check-modem.sh` warns when a modem owns a default route; fix it by making the modem interfaces *never-default* (the kernel keeps the on-link `/24` route, so the gateway still reaches them):
+
+**NetworkManager (desktop / notebook):**
+
+```bash
+nmcli -t -f NAME,DEVICE connection show --active     # find the modem connection names
+nmcli connection modify "<modem-con>" ipv4.never-default yes ipv4.ignore-auto-dns yes
+nmcli connection down "<modem-con>" && nmcli connection up "<modem-con>"
+```
+
+**netplan / systemd-networkd (typical server):**
+
+```yaml
+# /etc/netplan/60-modems.yaml   —   match by MAC if USB names move between ports
+network:
+  version: 2
+  ethernets:
+    enx344b50000000:            # OLAX
+      dhcp4: true
+      dhcp4-overrides: { use-routes: false, use-dns: false }
+    enp0s20f0u1:                # ZTE
+      dhcp4: true
+      dhcp4-overrides: { use-routes: false, use-dns: false }
+```
+
+Then `sudo netplan apply` and confirm `ip route` lists only your real uplink (wired/WiFi) as `default`.
+
 ## Authentication
 
 Every endpoint requires the API key, sent either way:
